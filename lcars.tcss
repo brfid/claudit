@@ -120,12 +120,15 @@ Screen {
 #overview-panel {
     layout: grid;
     grid-size: 3 2;
+    grid-rows: 1fr 1fr;
     grid-gutter: 1;
     padding: 1;
+    height: 1fr;
 }
 
 .stat-box {
     height: 100%;
+    min-height: 9;
     border: round #CC6699;
     padding: 1 2;
     background: #0a0a0a;
@@ -145,9 +148,11 @@ Screen {
     color: #CC9966;
 }
 
-#overview-sparklines {
-    height: auto;
-    padding: 1;
+.stat-box Sparkline {
+    height: 3;
+    margin-top: 1;
+    margin-left: 0;
+    margin-right: 0;
 }
 
 Sparkline {
