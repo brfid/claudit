@@ -15,7 +15,7 @@ from textual.widgets import Button, Label, Sparkline, Static
 from textual_plotext import PlotextPlot
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ai_cost_tracker import (
+from claudit import (
     FIELD_CACHE_READS,
     FIELD_CACHE_SAVINGS,
     FIELD_CACHE_WRITES,
@@ -36,7 +36,8 @@ from ai_cost_tracker import (
     run_ingest,
 )
 
-TABS = ["OVERVIEW", "COST", "TOKENS", "CACHE", "ACTIVITY", "CUMULATIVE"]
+TABS = ["OVERVIEW", "COST", "TOKENS", "CACHE", "ACTIVITY",
+        "CALENDAR", "SPEND", "HISTOGRAM", "CUMULATIVE"]
 
 
 # ── Helper: aggregate by hour-of-day × day-of-week ──
@@ -60,6 +61,15 @@ def aggregate_hourly_heatmap(ledger: Dict, source_filter: Optional[str] = None
     grid = [[0] * 24 for _ in range(7)]
     for dt, _ in _iter_individual_entries(ledger, source_filter):
         grid[dt.weekday()][dt.hour] += 1
+    return grid
+
+
+def aggregate_hourly_cost_heatmap(ledger: Dict, source_filter: Optional[str] = None
+                                  ) -> List[List[float]]:
+    """Build 7×24 grid of cost (rows=days Mon-Sun, cols=hours)."""
+    grid = [[0.0] * 24 for _ in range(7)]
+    for dt, entry in _iter_individual_entries(ledger, source_filter):
+        grid[dt.weekday()][dt.hour] += entry.get(FIELD_COST, 0)
     return grid
 
 
@@ -104,7 +114,7 @@ DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 class CostTrackerApp(App):
     CSS_PATH = Path(__file__).resolve().parent / "lcars.tcss"
-    TITLE = "AI COST TRACKER"
+    TITLE = "CLAUDIT"
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("1", "tab('OVERVIEW')", "Overview"),
@@ -112,7 +122,10 @@ class CostTrackerApp(App):
         ("3", "tab('TOKENS')", "Tokens"),
         ("4", "tab('CACHE')", "Cache"),
         ("5", "tab('ACTIVITY')", "Activity"),
-        ("6", "tab('CUMULATIVE')", "Cumulative"),
+        ("6", "tab('CALENDAR')", "Calendar"),
+        ("7", "tab('SPEND')", "Spend Map"),
+        ("8", "tab('HISTOGRAM')", "Histogram"),
+        ("9", "tab('CUMULATIVE')", "Cumulative"),
     ]
 
     def __init__(self, ledger_path_override=None, source_filter="all",
@@ -141,7 +154,7 @@ class CostTrackerApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="top-bar"):
             yield Static(datetime.now().strftime("%m·%d"), id="top-elbow")
-            yield Static("AI COST TRACKER", id="top-title")
+            yield Static("CLAUDIT", id="top-title")
             yield Static("", id="top-bar-line")
 
         with Horizontal():
@@ -192,6 +205,9 @@ class CostTrackerApp(App):
             "TOKENS": self._build_tokens_chart,
             "CACHE": self._build_cache_chart,
             "ACTIVITY": self._build_activity,
+            "CALENDAR": self._build_calendar_heatmap,
+            "SPEND": self._build_spend_heatmap,
+            "HISTOGRAM": self._build_cost_histogram,
             "CUMULATIVE": self._build_cumulative_chart,
         }
         container = self.query_one("#panel-container", Vertical)
@@ -433,6 +449,162 @@ class CostTrackerApp(App):
             Label(
                 f"  Peak: {peak_hour:02d}:00 ({peak_count:,} requests)  |  "
                 f"All-time total: {total_requests:,}",
+                classes="chart-subtitle",
+            ),
+            plot,
+            classes="chart-panel",
+        )
+
+    # ── Calendar heatmap (GitHub-style) ──
+
+    def _build_calendar_heatmap(self) -> Widget:
+        sorted_days = sorted(self._daily.keys())
+        if not sorted_days:
+            return Vertical(Label("  No data", classes="chart-title"),
+                            classes="chart-panel")
+
+        last_90 = sorted_days[-90:]
+        cost_by_date = {d: self._daily[d][FIELD_COST] for d in last_90}
+        max_cost = max(cost_by_date.values()) if cost_by_date else 1
+
+        first = datetime.strptime(last_90[0], "%Y-%m-%d")
+        last = datetime.strptime(last_90[-1], "%Y-%m-%d")
+
+        # Build week columns (Sun=top → Sat=bottom to match GitHub)
+        # Each column is one ISO week; rows are weekdays Mon(0)→Sun(6)
+        num_days = (last - first).days + 1
+        start_weekday = first.weekday()  # Mon=0
+
+        # Pad to start on Monday
+        grid_start = first - timedelta(days=start_weekday)
+        grid_end = last + timedelta(days=(6 - last.weekday()))
+        total_days = (grid_end - grid_start).days + 1
+        num_weeks = total_days // 7
+
+        grid = [[0.0] * num_weeks for _ in range(7)]
+        for w in range(num_weeks):
+            for d in range(7):
+                date = grid_start + timedelta(days=w * 7 + d)
+                date_str = date.strftime("%Y-%m-%d")
+                if date_str in cost_by_date:
+                    grid[d][w] = cost_by_date[date_str]
+
+        total_cost = sum(cost_by_date.values())
+        active_days = len([v for v in cost_by_date.values() if v > 0])
+
+        # Month labels on x-axis
+        month_ticks = []
+        month_labels = []
+        for w in range(num_weeks):
+            date = grid_start + timedelta(days=w * 7)
+            if date.day <= 7:
+                month_ticks.append(w)
+                month_labels.append(date.strftime("%b"))
+
+        plot = PlotextPlot()
+
+        def on_mount_chart(event=None):
+            plt = self._init_plt(plot)
+            plt.matrix_plot(list(reversed(grid)))
+            plt.yticks(list(range(7)),
+                       list(reversed(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])))
+            if month_ticks:
+                plt.xticks(month_ticks, month_labels)
+            plt.title("Daily cost intensity")
+            plot.refresh()
+
+        plot.call_after_refresh(on_mount_chart)
+        return Vertical(
+            Label("  CALENDAR HEATMAP — DAILY COST (90 days)", classes="chart-title"),
+            Label(
+                f"  {last_90[0]} → {last_90[-1]}  |  "
+                f"{active_days} active days  |  "
+                f"Total: {format_cost(total_cost)}  |  "
+                f"Peak: {format_cost(max_cost)}",
+                classes="chart-subtitle",
+            ),
+            plot,
+            classes="chart-panel",
+        )
+
+    # ── Spend heatmap (cost by hour × day-of-week) ──
+
+    def _build_spend_heatmap(self) -> Widget:
+        grid = aggregate_hourly_cost_heatmap(self._ledger, self._source_filter)
+
+        flat = [v for row in grid for v in row if v > 0]
+        total_cost = sum(v for row in grid for v in row)
+        if flat:
+            peak_val = max(flat)
+            peak_idx = [(d, h) for d in range(7) for h in range(24)
+                        if grid[d][h] == peak_val][0]
+            peak_label = f"{DAY_NAMES[peak_idx[0]]} {peak_idx[1]:02d}:00 ({format_cost(peak_val)})"
+        else:
+            peak_label = "—"
+
+        plot = PlotextPlot()
+
+        def on_mount_chart(event=None):
+            plt = self._init_plt(plot)
+            plt.matrix_plot(list(reversed(grid)))
+            plt.yticks(list(range(7)), list(reversed(DAY_NAMES)))
+            plt.xticks(
+                [i for i in range(24) if i % 3 == 0],
+                [str(i) for i in range(24) if i % 3 == 0],
+            )
+            plt.title("Cost per hour ($)")
+            plot.refresh()
+
+        plot.call_after_refresh(on_mount_chart)
+        return Vertical(
+            Label("  SPEND HEATMAP — COST BY HOUR × DAY", classes="chart-title"),
+            Label(
+                f"  Peak: {peak_label}  |  "
+                f"Total: {format_cost(total_cost)}",
+                classes="chart-subtitle",
+            ),
+            plot,
+            classes="chart-panel",
+        )
+
+    # ── Session cost histogram ──
+
+    def _build_cost_histogram(self) -> Widget:
+        costs = []
+        for dt, entry in _iter_individual_entries(self._ledger, self._source_filter):
+            c = entry.get(FIELD_COST, 0)
+            if c > 0:
+                costs.append(c)
+
+        if not costs:
+            return Vertical(Label("  No cost data", classes="chart-title"),
+                            classes="chart-panel")
+
+        costs.sort()
+        median = costs[len(costs) // 2]
+        p95 = costs[int(len(costs) * 0.95)]
+        p99 = costs[int(len(costs) * 0.99)]
+        mean = sum(costs) / len(costs)
+
+        plot = PlotextPlot()
+
+        def on_mount_chart(event=None):
+            plt = self._init_plt(plot)
+            bins = min(50, max(10, len(costs) // 100))
+            plt.hist(costs, bins=bins, color=(255, 153, 0))
+            plt.xlabel("Cost per API call ($)")
+            plt.ylabel("Count")
+            plot.refresh()
+
+        plot.call_after_refresh(on_mount_chart)
+        return Vertical(
+            Label("  COST DISTRIBUTION — PER API CALL", classes="chart-title"),
+            Label(
+                f"  {len(costs):,} calls  |  "
+                f"Median: {format_cost(median)}  |  "
+                f"Mean: {format_cost(mean)}  |  "
+                f"P95: {format_cost(p95)}  |  "
+                f"P99: {format_cost(p99)}",
                 classes="chart-subtitle",
             ),
             plot,
