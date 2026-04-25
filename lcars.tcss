@@ -1,0 +1,195 @@
+/* LCARS (Star Trek TNG) Theme for AI Cost Tracker TUI */
+
+/* ── Color palette ── */
+/* Amber: #FF9900  Mauve: #CC6699  Periwinkle: #9999CC
+   Peach: #FFCC99  Lavender: #CC99CC  Tan: #CC9966
+   Blue:  #6688CC  Red: #CC6666  Pale: #FFCC99 */
+
+Screen {
+    background: #000000;
+}
+
+/* ── Top bar ── */
+
+#top-bar {
+    dock: top;
+    height: 3;
+    background: #000000;
+    layout: horizontal;
+}
+
+#top-elbow {
+    width: 12;
+    height: 3;
+    background: #CC6699;
+    content-align: center middle;
+    color: #000000;
+    text-style: bold;
+}
+
+#top-bar-line {
+    width: 1fr;
+    height: 1;
+    margin-top: 1;
+    background: #CC6699;
+}
+
+#top-title {
+    width: auto;
+    padding: 0 2;
+    margin-top: 1;
+    height: 1;
+    color: #FF9900;
+    text-style: bold;
+    background: #000000;
+}
+
+/* ── Bottom bar ── */
+
+#bottom-bar {
+    dock: bottom;
+    height: 3;
+    background: #000000;
+    layout: horizontal;
+}
+
+#bottom-elbow {
+    width: 12;
+    height: 3;
+    background: #9999CC;
+}
+
+#bottom-bar-line {
+    width: 1fr;
+    height: 1;
+    margin-bottom: 1;
+    background: #9999CC;
+}
+
+#bottom-status {
+    width: auto;
+    padding: 0 2;
+    margin-bottom: 1;
+    height: 1;
+    color: #9999CC;
+    background: #000000;
+}
+
+/* ── Sidebar nav ── */
+
+#sidebar {
+    dock: left;
+    width: 14;
+    background: #000000;
+    padding: 0;
+}
+
+.nav-button {
+    width: 100%;
+    height: 3;
+    margin-bottom: 1;
+    border: none;
+    text-style: bold;
+    color: #000000;
+    background: #CC9966;
+    text-align: center;
+    content-align: center middle;
+}
+
+.nav-button:hover {
+    background: #FF9900;
+}
+
+.nav-button.active {
+    background: #FF9900;
+}
+
+.nav-button:focus {
+    background: #FF9900;
+}
+
+/* ── Main content ── */
+
+#main-content {
+    margin: 0 1;
+    background: #000000;
+}
+
+/* ── Overview panel ── */
+
+#overview-panel {
+    layout: grid;
+    grid-size: 3 2;
+    grid-gutter: 1;
+    padding: 1;
+}
+
+.stat-box {
+    height: 100%;
+    border: round #CC6699;
+    padding: 1 2;
+    background: #0a0a0a;
+}
+
+.stat-box .stat-label {
+    color: #9999CC;
+    text-style: bold;
+}
+
+.stat-box .stat-value {
+    color: #FF9900;
+    text-style: bold;
+}
+
+.stat-box .stat-detail {
+    color: #CC9966;
+}
+
+#overview-sparklines {
+    height: auto;
+    padding: 1;
+}
+
+Sparkline {
+    height: 3;
+    margin: 0 1;
+}
+
+Sparkline > .sparkline--max-color {
+    color: #FF9900;
+}
+
+Sparkline > .sparkline--min-color {
+    color: #CC6699;
+}
+
+/* ── Chart panels ── */
+
+.chart-panel {
+    padding: 0;
+    background: #000000;
+}
+
+.chart-panel PlotextPlot {
+    height: 1fr;
+    min-height: 16;
+    background: #000000;
+}
+
+.chart-title {
+    dock: top;
+    height: 1;
+    color: #FF9900;
+    text-style: bold;
+    padding: 0 1;
+    background: #000000;
+}
+
+.chart-subtitle {
+    dock: top;
+    height: 1;
+    color: #9999CC;
+    padding: 0 1;
+    background: #000000;
+}
+
