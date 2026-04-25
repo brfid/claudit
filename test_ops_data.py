@@ -1,0 +1,280 @@
+"""Tests for pure ops_data helpers."""
+
+from datetime import datetime, timedelta
+
+from ops_data import (
+    TOOL_ABBREV,
+    aggregate_today,
+    collect_entries,
+    cost_bar,
+    hourly_cost_today,
+    model_color,
+    percentile,
+    row_preview_text,
+    short_model,
+    short_project,
+    short_tools,
+)
+
+
+# ── short_model ───────────────────────────────────────────────────────────
+
+class TestShortModel:
+    def test_opus(self):
+        assert short_model("claude-opus-4-6") == "opus-4.6"
+
+    def test_sonnet_with_date_suffix(self):
+        assert short_model("claude-sonnet-4-5-20250929") == "sonnet-4.5"
+
+    def test_haiku(self):
+        assert short_model("claude-haiku-4-5-20251001") == "haiku-4.5"
+
+    def test_none(self):
+        assert short_model(None) == "—"
+
+    def test_unknown(self):
+        assert short_model("gpt-4") == "gpt"
+
+    def test_empty(self):
+        assert short_model("") == "—"
+
+
+# ── model_color ───────────────────────────────────────────────────────────
+
+class TestModelColor:
+    def test_opus_amber(self):
+        assert model_color("opus-4.7") == "#FF9900"
+
+    def test_sonnet_periwinkle(self):
+        assert model_color("sonnet-4.5") == "#9999CC"
+
+    def test_haiku_mauve(self):
+        assert model_color("haiku-4.5") == "#CC6699"
+
+    def test_unknown_family_fallback(self):
+        assert model_color("mystery-1") == "#CC9966"
+
+
+# ── short_project ─────────────────────────────────────────────────────────
+
+class TestShortProject:
+    def test_basename(self):
+        assert short_project("~/src/techdocs-tools") == "techdocs-tools"
+
+    def test_trailing_slash(self):
+        assert short_project("/foo/bar/") == "bar"
+
+    def test_empty(self):
+        assert short_project("") == "—"
+
+
+# ── short_tools ───────────────────────────────────────────────────────────
+
+class TestShortTools:
+    def test_empty(self):
+        assert short_tools([]) == ""
+
+    def test_known_abbrevs(self):
+        assert short_tools(["Read", "Edit", "Bash"]) == "RE$"
+
+    def test_repeats_get_count(self):
+        assert short_tools(["Read", "Read", "Read", "Edit"]) == "R×3E"
+
+    def test_unknown_collapses_to_letter(self):
+        assert short_tools(["Mystery"]) == "M"
+
+    def test_abbrev_table_covers_common_tools(self):
+        # Sanity: the abbreviation table has entries for Claude Code's core tools
+        for t in ("Read", "Write", "Edit", "Bash", "Grep", "Glob"):
+            assert t in TOOL_ABBREV
+
+
+# ── cost_bar ──────────────────────────────────────────────────────────────
+
+class TestCostBar:
+    def test_full(self):
+        assert cost_bar(10, 10, width=4) == "▓▓▓▓"
+
+    def test_half(self):
+        assert cost_bar(5, 10, width=4) == "▓▓░░"
+
+    def test_empty(self):
+        assert cost_bar(0, 10, width=4) == "░░░░"
+
+    def test_zero_max(self):
+        assert cost_bar(5, 0, width=4) == "    "
+
+
+# ── percentile ────────────────────────────────────────────────────────────
+
+class TestPercentile:
+    def test_empty(self):
+        assert percentile([], 0.5) == 0
+
+    def test_median(self):
+        assert percentile([1, 2, 3, 4, 5], 0.5) == 3
+
+    def test_p95(self):
+        # idx = min(4, int(5*0.95)) = 4 → last element
+        assert percentile([1, 2, 3, 4, 5], 0.95) == 5
+
+    def test_single(self):
+        assert percentile([42], 0.5) == 42
+
+
+# ── hourly_cost_today ─────────────────────────────────────────────────────
+
+class TestHourlyCostToday:
+    def _entry(self, dt, cost):
+        return (dt, f"id-{cost}", {"cost": cost, "ts": dt.isoformat(),
+                                    "source": "cc"})
+
+    def test_empty_ledger(self):
+        result = hourly_cost_today([])
+        assert result == [0.0] * 24
+
+    def test_sums_by_hour(self):
+        today = datetime.now().replace(hour=14, minute=0, second=0, microsecond=0)
+        entries = [
+            self._entry(today, 1.0),
+            self._entry(today.replace(hour=14, minute=30), 2.0),
+            self._entry(today.replace(hour=9), 0.5),
+        ]
+        result = hourly_cost_today(entries)
+        assert result[14] == 3.0
+        assert result[9] == 0.5
+        assert result[0] == 0.0
+        assert sum(result) == 3.5
+
+    def test_ignores_other_days(self):
+        today = datetime.now().replace(hour=12)
+        yesterday = today - timedelta(days=1)
+        entries = [
+            self._entry(today, 1.0),
+            self._entry(yesterday, 99.0),
+        ]
+        result = hourly_cost_today(entries)
+        assert sum(result) == 1.0
+
+
+# ── collect_entries ───────────────────────────────────────────────────────
+
+class TestCollectEntries:
+    def test_sorted_newest_first(self):
+        now = datetime.now()
+        ledger = {
+            "a": {"source": "cc", "ts": (now - timedelta(hours=2)).isoformat(),
+                  "cost": 1.0},
+            "b": {"source": "cc", "ts": now.isoformat(), "cost": 2.0},
+            "c": {"source": "cc", "ts": (now - timedelta(hours=1)).isoformat(),
+                  "cost": 3.0},
+        }
+        result = collect_entries(ledger, source_filter=None)
+        assert [eid for _, eid, _ in result] == ["b", "c", "a"]
+
+    def test_source_filter(self):
+        now = datetime.now()
+        ledger = {
+            "a": {"source": "cc", "ts": now.isoformat(), "cost": 1.0},
+            "b": {"source": "cline", "ts": now.isoformat(), "cost": 2.0},
+        }
+        result = collect_entries(ledger, source_filter="cc")
+        assert [eid for _, eid, _ in result] == ["a"]
+
+    def test_skips_unparseable_timestamps(self):
+        ledger = {
+            "a": {"source": "cc", "ts": "not-a-date", "cost": 1.0},
+            "b": {"source": "cc", "ts": datetime.now().isoformat(), "cost": 2.0},
+        }
+        result = collect_entries(ledger, source_filter=None)
+        assert [eid for _, eid, _ in result] == ["b"]
+
+
+# ── aggregate_today ───────────────────────────────────────────────────────
+
+class TestAggregateToday:
+    def _make_entries(self):
+        now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+        yesterday = now - timedelta(days=1)
+        return [
+            (now, "a", {
+                "source": "cc", "ts": now.isoformat(),
+                "cost": 1.0, "tokensIn": 100, "tokensOut": 50,
+                "cacheSavings": 0.5, "model": "claude-opus-4-6",
+                "project": "/Users/x/src/proj1", "stopReason": "end_turn",
+                "isSubagent": False,
+            }),
+            (now - timedelta(minutes=30), "b", {
+                "source": "cc", "ts": now.isoformat(),
+                "cost": 2.0, "tokensIn": 200, "tokensOut": 100,
+                "cacheSavings": 0.3, "model": "claude-sonnet-4-5",
+                "project": "/Users/x/src/proj2", "stopReason": "tool_use",
+                "isSubagent": True,
+            }),
+            (yesterday, "c", {
+                "source": "cc", "ts": yesterday.isoformat(),
+                "cost": 99.0, "tokensIn": 999, "tokensOut": 999,
+                "cacheSavings": 0, "model": "claude-opus-4-6",
+                "project": "", "stopReason": "end_turn",
+                "isSubagent": False,
+            }),
+        ]
+
+    def test_excludes_other_days(self):
+        s = aggregate_today(self._make_entries(), short_project, short_model)
+        assert s["count"] == 2
+        assert s["cost"] == 3.0
+
+    def test_token_totals(self):
+        s = aggregate_today(self._make_entries(), short_project, short_model)
+        assert s["tokens_in"] == 300
+        assert s["tokens_out"] == 150
+
+    def test_subagent_isolation(self):
+        s = aggregate_today(self._make_entries(), short_project, short_model)
+        assert s["subagent_count"] == 1
+        assert s["subagent_cost"] == 2.0
+
+    def test_project_rollup(self):
+        s = aggregate_today(self._make_entries(), short_project, short_model)
+        assert s["project_cost"]["proj1"] == 1.0
+        assert s["project_cost"]["proj2"] == 2.0
+
+    def test_model_rollup(self):
+        s = aggregate_today(self._make_entries(), short_project, short_model)
+        assert s["model_counts"]["opus-4.6"] == 1
+        assert s["model_counts"]["sonnet-4.5"] == 1
+
+    def test_stop_rollup(self):
+        s = aggregate_today(self._make_entries(), short_project, short_model)
+        assert s["stop_counts"]["end_turn"] == 1
+        assert s["stop_counts"]["tool_use"] == 1
+
+    def test_costs_sorted(self):
+        s = aggregate_today(self._make_entries(), short_project, short_model)
+        assert s["costs"] == [1.0, 2.0]
+
+
+# ── row_preview_text ──────────────────────────────────────────────────────
+
+class TestRowPreviewText:
+    def test_with_prompt(self):
+        r = row_preview_text({"promptPreview": "hello world"})
+        assert "hello world" in r
+        assert "»" in r
+
+    def test_empty_falls_back_to_stop(self):
+        r = row_preview_text({"stopReason": "tool_use"})
+        assert "stop=tool_use" in r
+
+    def test_subagent_flag(self):
+        r = row_preview_text({"isSubagent": True, "stopReason": "end_turn"})
+        assert "subagent turn" in r
+
+    def test_no_data(self):
+        r = row_preview_text({})
+        assert "no prompt captured" in r
+
+    def test_collapses_whitespace(self):
+        r = row_preview_text({"promptPreview": "hi\n\n\t  there"})
+        assert "hi there" in r

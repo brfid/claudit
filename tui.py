@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Click
 from textual.widget import Widget
-from textual.widgets import Button, Label, Sparkline, Static
+from textual.widgets import Button, Label, Static
 
 from textual_plotext import PlotextPlot
 
@@ -22,8 +24,8 @@ from claudit import (
     FIELD_REQUESTS,
     FIELD_TOKENS_IN,
     FIELD_TOKENS_OUT,
+    SOURCE_MAP,
     aggregate_by_day,
-    calculate_averages,
     calculate_totals,
     entry_local_dt,
     format_cost,
@@ -34,9 +36,29 @@ from claudit import (
     load_ledger,
     run_ingest,
 )
+from ops_data import (
+    aggregate_today,
+    collect_entries,
+    cost_bar,
+    hourly_cost_today,
+    model_color,
+    percentile,
+    row_preview_text,
+    short_model,
+    short_project,
+    short_tools,
+)
+from ops_widgets import (
+    EntryDetailScreen,
+    FluidBar,
+    HourlyBar,
+    LogRow,
+    StackedBar,
+    StatBox,
+)
 
 TABS = ["OVERVIEW", "DAILY", "CUMULATIVE", "CALENDAR", "TOKENS",
-        "CACHE", "REQUESTS", "COST MAP", "CALLS"]
+        "CACHE", "REQUESTS", "COST MAP", "CALLS", "OPS"]
 
 
 # ── Helper: aggregate by hour-of-day × day-of-week ──
@@ -63,29 +85,6 @@ def aggregate_hourly_cost_heatmap(ledger: Dict, source_filter: Optional[str] = N
     return grid
 
 
-# ── Stat box widget ──
-
-class StatBox(Static):
-    """Single stat readout in LCARS style."""
-
-    def __init__(self, label: str, value: str, detail: str = "",
-                 spark_data: Optional[List[float]] = None, **kwargs):
-        super().__init__(**kwargs)
-        self._label = label
-        self._value = value
-        self._detail = detail
-        self._spark_data = spark_data
-
-    def compose(self) -> ComposeResult:
-        yield Label(self._label, classes="stat-label")
-        yield Label(self._value, classes="stat-value")
-        if self._detail:
-            yield Label(self._detail, classes="stat-detail")
-        if self._spark_data and any(v > 0 for v in self._spark_data):
-            yield Sparkline(self._spark_data, summary_function=max)
-
-
-
 # ── Heatmap (plotext matrix) ──
 
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -96,17 +95,26 @@ DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 class CostTrackerApp(App):
     CSS_PATH = Path(__file__).resolve().parent / "lcars.tcss"
     TITLE = "CLAUDIT"
+    REFRESH_INTERVAL = 30
+    NEW_ROW_HIGHLIGHT_TICKS = 2
     BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("1", "tab('OVERVIEW')", "Overview"),
-        ("2", "tab('DAILY')", "Daily"),
-        ("3", "tab('CUMULATIVE')", "Cumulative"),
-        ("4", "tab('CALENDAR')", "Calendar"),
-        ("5", "tab('TOKENS')", "Tokens"),
-        ("6", "tab('CACHE')", "Cache"),
-        ("7", "tab('REQUESTS')", "Requests"),
-        ("8", "tab('COST MAP')", "Cost Map"),
-        ("9", "tab('CALLS')", "Calls"),
+        Binding("q", "quit", "Quit"),
+        Binding("r", "toggle_refresh", "Toggle refresh"),
+        Binding("j", "scroll_log(1)", "Scroll ↓", show=False),
+        Binding("k", "scroll_log(-1)", "Scroll ↑", show=False),
+        Binding("J", "scroll_log(10)", "Page ↓", show=False),
+        Binding("K", "scroll_log(-10)", "Page ↑", show=False),
+        Binding("enter", "expand_selected", "Expand row", show=False),
+        Binding("1", "tab('OVERVIEW')", "Overview", show=False),
+        Binding("2", "tab('DAILY')", "Daily", show=False),
+        Binding("3", "tab('CUMULATIVE')", "Cumulative", show=False),
+        Binding("4", "tab('CALENDAR')", "Calendar", show=False),
+        Binding("5", "tab('TOKENS')", "Tokens", show=False),
+        Binding("6", "tab('CACHE')", "Cache", show=False),
+        Binding("7", "tab('REQUESTS')", "Requests", show=False),
+        Binding("8", "tab('COST MAP')", "Cost Map", show=False),
+        Binding("9", "tab('CALLS')", "Calls", show=False),
+        Binding("0", "tab('OPS')", "Ops", show=False),
     ]
 
     def __init__(self, ledger_path_override=None, source_filter="all",
@@ -119,6 +127,16 @@ class CostTrackerApp(App):
         self._ledger: Dict = {}
         self._daily: Dict = {}
         self._source_filter: Optional[str] = None
+        self._current_tab: str = "OVERVIEW"
+        self._auto_refresh: bool = True
+        self._refresh_timer = None
+        # Diff tracking for auto-refresh highlight: id → ticks-remaining
+        self._new_entry_ids: Dict[str, int] = {}
+        self._seen_ids: set = set()
+        # Selected row index in OPS call log; -1 means no selection
+        self._selected_row: int = -1
+        # Cache sorted entries for expand-row + scroll (set by _build_ops)
+        self._ops_entries_cache: list = []
 
     def _load_data(self):
         ledger_path = get_ledger_path(self._ledger_path_override)
@@ -127,10 +145,22 @@ class CostTrackerApp(App):
         run_ingest(ledger_path, self._ledger, source=self._source_filter_arg,
                    no_ingest=self._no_ingest, force_ingest=self._force_ingest)
 
-        source_map = {'claude-code': 'cc', 'cline': 'cline'}
-        self._source_filter = None if self._source_filter_arg == "all" else source_map.get(self._source_filter_arg, self._source_filter_arg)
+        arg = self._source_filter_arg
+        self._source_filter = None if arg == "all" else SOURCE_MAP.get(arg, arg)
 
         self._daily = aggregate_by_day(self._ledger, source_filter=self._source_filter)
+
+        current_ids = set(self._ledger.keys())
+        if self._seen_ids:
+            # Age existing highlights
+            self._new_entry_ids = {
+                eid: ticks - 1
+                for eid, ticks in self._new_entry_ids.items()
+                if ticks > 1 and eid in current_ids
+            }
+            for eid in current_ids - self._seen_ids:
+                self._new_entry_ids[eid] = self.NEW_ROW_HIGHLIGHT_TICKS
+        self._seen_ids = current_ids
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="top-bar"):
@@ -158,11 +188,101 @@ class CostTrackerApp(App):
 
     def on_mount(self) -> None:
         self._load_data()
+        self._update_status_bar()
+        self._render_tab("OVERVIEW")
+        self._refresh_timer = self.set_interval(
+            self.REFRESH_INTERVAL, self._auto_refresh_tick
+        )
+
+    def _update_status_bar(self) -> None:
         entry_count = len(self._ledger)
         day_count = len(self._daily)
+        refresh_icon = "⟳" if self._auto_refresh else "⏸"
+        new_count = len(self._new_entry_ids)
+        new_badge = f" · [#FF9900]+{new_count} new[/]" if new_count else ""
+        dot = " [#9999CC]◤[/] "
+        hint = (f"{dot}j/k select{dot}ENTER details{dot}click row"
+                f"{dot}r pause{dot}q quit")
         status = self.query_one("#bottom-status", Static)
-        status.update(f"  {entry_count:,} entries · {day_count} active days  ")
-        self._render_tab("OVERVIEW")
+        status.update(
+            f"  [#FF9900]{entry_count:,}[/] entries{dot}"
+            f"[#FF9900]{day_count}[/] days{dot}"
+            f"{refresh_icon} {self.REFRESH_INTERVAL}s{new_badge}{hint}  ",
+        )
+
+    def _auto_refresh_tick(self) -> None:
+        if not self._auto_refresh:
+            return
+        self._force_ingest = False
+        self._load_data()
+        self._update_status_bar()
+        self._render_tab(self._current_tab)
+
+    def action_toggle_refresh(self) -> None:
+        self._auto_refresh = not self._auto_refresh
+        self._update_status_bar()
+
+    def action_scroll_log(self, delta: int) -> None:
+        """On OPS: move selection. Off OPS: scroll container."""
+        if self._current_tab == "OPS":
+            if not self._ops_entries_cache:
+                return
+            max_idx = min(100, len(self._ops_entries_cache)) - 1
+            # If nothing selected, j/J starts at top; k/K starts at bottom
+            if self._selected_row == -1:
+                self._selected_row = 0 if delta > 0 else max_idx
+            else:
+                self._selected_row = max(0, min(max_idx, self._selected_row + delta))
+            self._render_tab("OPS")
+            self._scroll_selected_into_view()
+            return
+        try:
+            scroller = self.query_one("#main-content", VerticalScroll)
+        except Exception:
+            return
+        scroller.scroll_relative(y=delta, animate=False)
+
+    def _scroll_selected_into_view(self) -> None:
+        try:
+            rows = list(self.query(LogRow))
+            if 0 <= self._selected_row < len(rows):
+                rows[self._selected_row].scroll_visible(animate=False)
+        except Exception:
+            pass
+
+    def action_expand_selected(self) -> None:
+        """Show modal with full prompt + metadata for the selected entry.
+
+        If nothing is selected, default to the top-most (most recent) entry.
+        """
+        if self._current_tab != "OPS" or not self._ops_entries_cache:
+            return
+        idx = self._selected_row if self._selected_row >= 0 else 0
+        idx = max(0, min(len(self._ops_entries_cache) - 1, idx))
+        dt, eid, entry = self._ops_entries_cache[idx]
+        self.push_screen(EntryDetailScreen(dt, eid, entry))
+
+    def on_log_row_clicked(self, message: "LogRow.Clicked") -> None:
+        """Clicking a log row selects it."""
+        if self._current_tab != "OPS":
+            return
+        self._selected_row = message.row_index
+        self._render_tab("OPS")
+
+    def on_click(self, event: Click) -> None:
+        """Click outside a log row clears selection on OPS tab."""
+        if self._current_tab != "OPS":
+            return
+        widget = getattr(event, "widget", None)
+        # Walk up from clicked widget looking for a LogRow ancestor
+        w = widget
+        while w is not None:
+            if isinstance(w, LogRow):
+                return
+            w = getattr(w, "parent", None)
+        if self._selected_row != -1:
+            self._selected_row = -1
+            self._render_tab("OPS")
 
     @staticmethod
     def _tab_slug(tab_name: str) -> str:
@@ -188,6 +308,7 @@ class CostTrackerApp(App):
         self._render_tab(tab_name)
 
     def _render_tab(self, tab_name: str) -> None:
+        self._current_tab = tab_name
         builders = {
             "OVERVIEW": self._build_overview,
             "DAILY": self._build_cost_chart,
@@ -198,6 +319,7 @@ class CostTrackerApp(App):
             "REQUESTS": self._build_activity,
             "COST MAP": self._build_spend_heatmap,
             "CALLS": self._build_cost_histogram,
+            "OPS": self._build_ops,
         }
         container = self.query_one("#panel-container", Vertical)
         container.remove_children()
@@ -244,47 +366,37 @@ class CostTrackerApp(App):
         today = datetime.now()
         today_data = self._daily.get(today_str, init_field_dict())
 
-        # -- Sparkline data: 7-day cost --
         last_7 = sorted_days[-7:] if len(sorted_days) >= 7 else sorted_days
-        spark_7d_cost = [self._daily.get(d, init_field_dict())[FIELD_COST]
-                         for d in last_7]
-
-        # -- Sparkline data: 4-week cost --
         last_28 = sorted_days[-28:] if len(sorted_days) >= 28 else sorted_days
+
+        spark_7d_cost = [self._daily[d][FIELD_COST] for d in last_7]
+
         week_costs: List[float] = []
         for i in range(0, len(last_28), 7):
             chunk = last_28[i:i + 7]
             week_costs.append(sum(self._daily[d][FIELD_COST] for d in chunk))
         spark_4w = week_costs if week_costs else [0.0]
 
-        # -- Sparkline data: 7-day tokens --
-        spark_7d_tokens = [
-            self._daily.get(d, init_field_dict())[FIELD_TOKENS_IN]
-            + self._daily.get(d, init_field_dict())[FIELD_TOKENS_OUT]
-            for d in last_7
-        ]
+        tokens_in_7d = [self._daily[d][FIELD_TOKENS_IN] for d in last_7]
+        tokens_out_7d = [self._daily[d][FIELD_TOKENS_OUT] for d in last_7]
+        spark_7d_tokens = [i + o for i, o in zip(tokens_in_7d, tokens_out_7d)]
 
-        # -- Sparkline data: 7-day cache efficiency --
         spark_7d_cache: List[float] = []
         for d in last_7:
-            dd = self._daily.get(d, init_field_dict())
+            dd = self._daily[d]
             potential = dd[FIELD_COST] + dd[FIELD_CACHE_SAVINGS]
             spark_7d_cache.append(
                 dd[FIELD_CACHE_SAVINGS] / potential * 100 if potential > 0 else 0
             )
 
-        # -- Sparkline data: 30-day daily cost --
-        spark_30d_cost = [data_30.get(d, init_field_dict())[FIELD_COST]
-                          for d in last_30]
+        spark_30d_cost = [self._daily[d][FIELD_COST] for d in last_30]
 
-        # -- Sparkline data: 30-day burn rate (7-day rolling avg) --
         spark_burn: List[float] = []
         for i in range(len(last_30)):
             window = last_30[max(0, i - 6):i + 1]
             avg = sum(self._daily[d][FIELD_COST] for d in window) / len(window)
             spark_burn.append(avg)
 
-        # -- Week-over-week comparison --
         this_week_start = (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
         last_week_start = (today - timedelta(days=today.weekday() + 7)).strftime("%Y-%m-%d")
         this_week_cost = sum(
@@ -301,46 +413,40 @@ class CostTrackerApp(App):
         else:
             wow_detail = "no prior week data"
 
-        # -- 30-day cache efficiency --
         potential_30 = totals[FIELD_COST] + totals[FIELD_CACHE_SAVINGS]
         cache_eff = (
             f"{totals[FIELD_CACHE_SAVINGS] / potential_30 * 100:.0f}% efficiency"
             if potential_30 > 0 else ""
         )
 
-        # -- Burn rate (7-day rolling avg) --
-        if len(last_7) > 0:
-            burn_rate = sum(self._daily[d][FIELD_COST] for d in last_7) / len(last_7)
-        else:
-            burn_rate = 0
-
-        # -- Token totals for 7d --
-        tokens_7d = sum(
-            self._daily.get(d, init_field_dict())[FIELD_TOKENS_IN]
-            + self._daily.get(d, init_field_dict())[FIELD_TOKENS_OUT]
-            for d in last_7
-        )
+        burn_rate = sum(spark_7d_cost) / len(last_7) if last_7 else 0
 
         stats_row = Horizontal(
             StatBox("TODAY", format_cost(today_data[FIELD_COST]),
                     f"{today_data[FIELD_REQUESTS]:,} requests",
-                    spark_data=spark_7d_cost, classes="stat-box"),
+                    spark_data=spark_7d_cost, spark_label="7d cost ▸",
+                    classes="stat-box"),
             StatBox("THIS WEEK", format_cost(this_week_cost),
                     wow_detail,
-                    spark_data=spark_4w, classes="stat-box"),
+                    spark_data=spark_4w, spark_label="4wk weekly ▸",
+                    classes="stat-box"),
             StatBox("30-DAY", format_cost(totals[FIELD_COST]),
                     f"{format_number(totals[FIELD_REQUESTS])} requests",
-                    spark_data=spark_30d_cost, classes="stat-box"),
-            StatBox("TOKENS (7d)", format_tokens(tokens_7d),
-                    f"{format_tokens(sum(self._daily.get(d, init_field_dict())[FIELD_TOKENS_IN] for d in last_7))} in / "
-                    f"{format_tokens(sum(self._daily.get(d, init_field_dict())[FIELD_TOKENS_OUT] for d in last_7))} out",
-                    spark_data=spark_7d_tokens, classes="stat-box"),
+                    spark_data=spark_30d_cost, spark_label="30d daily ▸",
+                    classes="stat-box"),
+            StatBox("TOKENS (7d)", format_tokens(sum(spark_7d_tokens)),
+                    f"{format_tokens(sum(tokens_in_7d))} in / "
+                    f"{format_tokens(sum(tokens_out_7d))} out",
+                    spark_data=spark_7d_tokens, spark_label="7d tokens ▸",
+                    classes="stat-box"),
             StatBox("CACHE HIT", format_cost(totals[FIELD_CACHE_SAVINGS]),
                     cache_eff,
-                    spark_data=spark_7d_cache, classes="stat-box"),
+                    spark_data=spark_7d_cache, spark_label="7d efficiency ▸",
+                    classes="stat-box"),
             StatBox("BURN RATE", f"{format_cost(burn_rate)}/day",
                     "7-day rolling avg",
-                    spark_data=spark_burn, classes="stat-box"),
+                    spark_data=spark_burn, spark_label="30d avg ▸",
+                    classes="stat-box"),
             id="overview-panel",
         )
 
@@ -367,8 +473,8 @@ class CostTrackerApp(App):
         return Vertical(
             Label("  DAILY COST ($)", classes="chart-title"),
             Label(
-                f"  {sorted_days[0]} → {sorted_days[-1]}  |  "
-                f"Total: {format_cost(total_cost)}  |  "
+                f"  {sorted_days[0]} → {sorted_days[-1]}  ◥  "
+                f"Total: {format_cost(total_cost)}  ◥  "
                 f"Avg: {format_cost(total_cost / len(costs))}/day"
                 if sorted_days else "",
                 classes="chart-subtitle",
@@ -443,7 +549,7 @@ class CostTrackerApp(App):
         return Vertical(
             Label("  CACHE PERFORMANCE", classes="chart-title"),
             Label(
-                f"  Total saved: {format_cost(total_saved)}  |  "
+                f"  Total saved: {format_cost(total_saved)}  ◥  "
                 f"Avg efficiency: {sum(pcts) / len(pcts):.0f}%"
                 if pcts else "",
                 classes="chart-subtitle",
@@ -480,8 +586,8 @@ class CostTrackerApp(App):
         return Vertical(
             Label("  ACTIVITY HEATMAP — REQUESTS (365 days)", classes="chart-title"),
             Label(
-                f"  {active_days} active days  |  "
-                f"Total: {total_requests:,}  |  "
+                f"  {active_days} active days  ◥  "
+                f"Total: {total_requests:,}  ◥  "
                 f"Peak: {peak_day[5:] if peak_day else '—'} ({peak_count:,})",
                 classes="chart-subtitle",
             ),
@@ -541,9 +647,9 @@ class CostTrackerApp(App):
         return Vertical(
             Label("  CALENDAR HEATMAP — DAILY COST (365 days)", classes="chart-title"),
             Label(
-                f"  {grid_start.strftime('%Y-%m-%d')} → {grid_end.strftime('%Y-%m-%d')}  |  "
-                f"{active_days} active days  |  "
-                f"Total: {format_cost(total_cost)}  |  "
+                f"  {grid_start.strftime('%Y-%m-%d')} → {grid_end.strftime('%Y-%m-%d')}  ◥  "
+                f"{active_days} active days  ◥  "
+                f"Total: {format_cost(total_cost)}  ◥  "
                 f"Peak: {format_cost(max_cost)}",
                 classes="chart-subtitle",
             ),
@@ -583,7 +689,7 @@ class CostTrackerApp(App):
         return Vertical(
             Label("  SPEND HEATMAP — COST BY HOUR × DAY", classes="chart-title"),
             Label(
-                f"  Peak: {peak_label}  |  "
+                f"  Peak: {peak_label}  ◥  "
                 f"Total: {format_cost(total_cost)}",
                 classes="chart-subtitle",
             ),
@@ -594,6 +700,13 @@ class CostTrackerApp(App):
     # ── Session cost histogram ──
 
     def _build_cost_histogram(self) -> Widget:
+        """Log-spaced bucket histogram with horizontal bars + percentile flags.
+
+        Plotext's plt.hist with linear bins is dominated by the tiny-cost mass
+        and hides the interesting tail. We bucket costs into intuitive dollar
+        ranges (<$0.01, $0.01-$0.05, ..., >$5) and draw horizontal count bars
+        with percentile markers inline.
+        """
         costs = []
         for dt, entry in _iter_individual_entries(self._ledger, self._source_filter):
             c = entry.get(FIELD_COST, 0)
@@ -610,30 +723,89 @@ class CostTrackerApp(App):
         p99 = costs[int(len(costs) * 0.99)]
         mean = sum(costs) / len(costs)
 
-        plot = PlotextPlot()
+        # Log-spaced buckets covering typical API call cost range
+        bucket_edges = [0, 0.001, 0.005, 0.01, 0.05, 0.10, 0.25, 0.50,
+                        1.00, 2.50, 5.00, float('inf')]
+        bucket_labels = [
+            "< $0.001", "$0.001–$0.005", "$0.005–$0.01",
+            "$0.01–$0.05", "$0.05–$0.10", "$0.10–$0.25", "$0.25–$0.50",
+            "$0.50–$1.00", "$1.00–$2.50", "$2.50–$5.00", "> $5.00",
+        ]
+        bucket_counts = [0] * len(bucket_labels)
+        bucket_totals = [0.0] * len(bucket_labels)
+        for c in costs:
+            for i in range(len(bucket_edges) - 1):
+                if bucket_edges[i] <= c < bucket_edges[i + 1]:
+                    bucket_counts[i] += 1
+                    bucket_totals[i] += c
+                    break
 
-        def on_mount_chart(event=None):
-            plt = self._init_plt(plot)
-            bins = min(50, max(10, len(costs) // 100))
-            plt.hist(costs, bins=bins, color=(255, 153, 0))
-            plt.xlabel("Cost per API call ($)")
-            plt.ylabel("Count")
-            plot.refresh()
+        total_calls = len(costs)
+        total_cost = sum(costs)
+        max_count = max(bucket_counts) if bucket_counts else 1
 
-        plot.call_after_refresh(on_mount_chart)
-        return Vertical(
-            Label("  COST DISTRIBUTION — PER API CALL", classes="chart-title"),
+        # Percentile positions mapped to bucket index
+        def bucket_of(c: float) -> int:
+            for i in range(len(bucket_edges) - 1):
+                if bucket_edges[i] <= c < bucket_edges[i + 1]:
+                    return i
+            return len(bucket_counts) - 1
+        median_b = bucket_of(median)
+        p95_b = bucket_of(p95)
+        p99_b = bucket_of(p99)
+
+        bar_width = 40
+        rows: list[Widget] = [
             Label(
-                f"  {len(costs):,} calls  |  "
-                f"Median: {format_cost(median)}  |  "
-                f"Mean: {format_cost(mean)}  |  "
-                f"P95: {format_cost(p95)}  |  "
-                f"P99: {format_cost(p99)}",
-                classes="chart-subtitle",
+                f" [#9999CC]Calls[/] [#FF9900]{total_calls:,}[/]  "
+                f"[#9999CC]Total[/] [#FF9900]{format_cost(total_cost)}[/]  "
+                f"[#9999CC]Median[/] [#FFCC99]{format_cost(median)}[/]  "
+                f"[#9999CC]Mean[/] [#FFCC99]{format_cost(mean)}[/]  "
+                f"[#9999CC]P95[/] [#FFCC99]{format_cost(p95)}[/]  "
+                f"[#9999CC]P99[/] [#FFCC99]{format_cost(p99)}[/]",
+                classes="ops-kv-line", markup=True,
             ),
-            plot,
-            classes="chart-panel",
-        )
+            Label(" ", classes="ops-kv-line"),
+            Label(
+                f" [b]{'BUCKET':<16}[/b] {'COUNT':>7} {'SHARE':>6}  "
+                f"{'DISTRIBUTION':<{bar_width}}  {'COST SUM':>8}",
+                classes="ops-log-header", markup=True,
+            ),
+        ]
+
+        for i, (lbl, count, tot) in enumerate(
+            zip(bucket_labels, bucket_counts, bucket_totals)
+        ):
+            share = count / total_calls * 100 if total_calls else 0
+            bar_len = int(count / max_count * bar_width) if max_count else 0
+            bar = "█" * bar_len + "░" * (bar_width - bar_len)
+            # Inline percentile flags at their bucket
+            flags = ""
+            if i == median_b:
+                flags += "[#9999CC] ◀ med[/]"
+            if i == p95_b:
+                flags += "[#CC6699] ◀ p95[/]"
+            if i == p99_b:
+                flags += "[#FF9900] ◀ p99[/]"
+            cost_str = format_cost(tot) if tot > 0 else "—"
+            rows.append(Label(
+                f" [#FFCC99]{lbl:<16}[/] [#FF9900]{count:>7,}[/] "
+                f"[dim]{share:>5.1f}%[/]  "
+                f"[#FF9900]{bar}[/]{flags}  [#CC9966]{cost_str:>8}[/]",
+                classes="ops-kv-line", markup=True,
+            ))
+
+        rows.append(Label(" ", classes="ops-kv-line"))
+        rows.append(Label(
+            " [dim]Buckets are log-spaced; most calls cluster at the low end. "
+            "Percentile markers (◀) flag where the median, P95, and P99 fall.[/]",
+            classes="ops-kv-line", markup=True,
+        ))
+
+        panel = Vertical(*rows, classes="ops-panel")
+        panel.border_title = "◖ COST DISTRIBUTION ◗"
+        panel.border_subtitle = "per API call"
+        return Vertical(panel, classes="chart-panel")
 
     # ── Cumulative cost chart ──
 
@@ -663,12 +835,287 @@ class CostTrackerApp(App):
         ]
         if cumulative:
             children.append(Label(
-                f"  {sorted_days[0]} → {sorted_days[-1]}  |  "
+                f"  {sorted_days[0]} → {sorted_days[-1]}  ◥  "
                 f"Total: {format_cost(cumulative[-1])}",
                 classes="chart-subtitle",
             ))
         children.append(plot)
         return Vertical(*children, classes="chart-panel")
+
+    # ── OPS tab ──
+
+
+    def _build_ops(self) -> Widget:
+        now = datetime.now()
+
+        entries = collect_entries(self._ledger, self._source_filter)
+        self._ops_entries_cache = entries
+
+        s = aggregate_today(entries, short_project, short_model)
+
+        if s["first_dt"]:
+            elapsed_hrs = max((now - s["first_dt"]).total_seconds() / 3600, 0.01)
+            rate_per_hr = s["cost"] / elapsed_hrs
+        else:
+            rate_per_hr = 0
+
+        potential = s["cost"] + s["savings"]
+        cache_eff = (s["savings"] / potential * 100) if potential > 0 else 0
+
+        med = percentile(s["costs"], 0.5)
+        p95 = percentile(s["costs"], 0.95)
+        mx_call = s["costs"][-1] if s["costs"] else 0
+
+        max_log_cost = max((e.get(FIELD_COST, 0) for _, _, e in entries[:100]),
+                           default=0)
+
+        sorted_projects = sorted(s["project_cost"].items(),
+                                 key=lambda x: x[1], reverse=True)
+        today_cost = s["cost"]
+        hour_cost = hourly_cost_today(entries)
+
+        # ── Session stats: grouped bigger stats + spacious layout ──
+        # Alternating cell accents for LCARS multi-color feel
+        def stat_cell(label: str, value: str, detail: str = "",
+                      accent: str = ""):
+            cls = "ops-stat-cell"
+            if accent:
+                cls += f" ops-stat-cell-{accent}"
+            return Vertical(
+                Label(f" [#9999CC]{label}[/]", classes="ops-stat-cell-label", markup=True),
+                Label(f" [#FF9900]{value}[/]", classes="ops-stat-cell-value", markup=True),
+                Label(f" [dim]{detail}[/]", classes="ops-stat-cell-detail", markup=True),
+                classes=cls,
+            )
+
+        session_row = Horizontal(
+            stat_cell("CALLS", f"{s['count']:,}",
+                      f"{s['subagent_count']:,} subagent"),
+            stat_cell("COST", format_cost(today_cost),
+                      f"{format_cost(rate_per_hr)}/hr", accent="alt"),
+            stat_cell("CACHE", f"{cache_eff:.0f}%",
+                      f"saved {format_cost(s['savings'])}", accent="accent"),
+            stat_cell("TOKENS",
+                      format_tokens(s['tokens_in'] + s['tokens_out']),
+                      f"{format_tokens(s['tokens_in'])} in · "
+                      f"{format_tokens(s['tokens_out'])} out", accent="alt"),
+            stat_cell("PER-CALL", format_cost(med),
+                      f"P95 {format_cost(p95)} · max {format_cost(mx_call)}"),
+            classes="ops-stat-row",
+        )
+
+        # 24-cell hourly bar — always full-width, ghost empties
+        hourly_spark = HourlyBar(hour_cost, classes="ops-hourly-spark")
+        # Hour tick labels underneath (00 ... 06 ... 12 ... 18 ... 23)
+        hourly_axis_children: list[Widget] = []
+        for h in range(24):
+            if h % 6 == 0 or h == 23:
+                lbl = f"{h:02d}"
+            else:
+                lbl = " "
+            hourly_axis_children.append(
+                Static(f"[dim]{lbl}[/]", classes="hourly-axis", markup=True)
+            )
+        hourly_axis = Horizontal(*hourly_axis_children, classes="ops-hourly-axis")
+
+        hourly_wrap = Vertical(hourly_spark, hourly_axis,
+                               classes="ops-hourly-wrap")
+        hourly_wrap.border_title = "◖ HOURLY ACTIVITY ◗"
+        hourly_wrap.border_subtitle = (
+            f"cost per hour · today {format_cost(today_cost)}"
+        )
+        session_panel = Vertical(
+            session_row,
+            hourly_wrap,
+            classes="ops-panel ops-panel-session",
+        )
+        session_panel.border_title = "◖ SESSION STATS ◗"
+        session_panel.border_subtitle = "today"
+
+        stats_children: list[Widget] = [session_panel]
+
+        # ── Active Projects + Model Mix side-by-side (richer LCARS graphics) ──
+        side_by_side_children: list[Widget] = []
+
+        if sorted_projects:
+            proj_rows: list[Widget] = []
+            for proj, cost in sorted_projects[:6]:
+                pct = (cost / today_cost * 100) if today_cost > 0 else 0
+                proj_rows.append(Label(
+                    f" [#FFCC99]{proj[:34]:<34}[/] "
+                    f"[#FFCC99]{format_cost(cost):>7}[/] [dim]{pct:>3.0f}%[/]",
+                    classes="ops-project-name", markup=True,
+                ))
+                proj_rows.append(Horizontal(
+                    Static(" [#CC6699]◖[/]", classes="bar-cap", markup=True),
+                    FluidBar(pct / 100.0, fill_color="#FF9900",
+                             classes="fluid-bar"),
+                    Static("[#CC6699]◗[/] ", classes="bar-cap", markup=True),
+                    classes="ops-project-bar",
+                ))
+            proj_panel = Vertical(*proj_rows, classes="ops-panel ops-panel-half")
+            proj_panel.border_title = "◖ ACTIVE PROJECTS ◗"
+            proj_panel.border_subtitle = f"{len(sorted_projects)} total"
+            side_by_side_children.append(proj_panel)
+
+        model_counts = s["model_counts"]
+        stop_counts = s["stop_counts"]
+        if model_counts or stop_counts:
+            mix_rows: list[Widget] = []
+            if model_counts:
+                total_calls = sum(model_counts.values()) or 1
+                segments = sorted(model_counts.items(),
+                                  key=lambda x: x[1], reverse=True)
+                # Fluid stacked bar on top spanning full panel width
+                stacked_segs = [(m, c, model_color(m))
+                                for m, c in segments]
+                mix_rows.append(Horizontal(
+                    Static(" [#CC6699]◖[/]", classes="bar-cap", markup=True),
+                    StackedBar(stacked_segs, classes="fluid-bar"),
+                    Static("[#CC6699]◗[/] ", classes="bar-cap", markup=True),
+                    classes="ops-mix-bar",
+                ))
+                mix_rows.append(Label(
+                    f" [dim]{total_calls:,} calls total[/]",
+                    classes="ops-mix-legend", markup=True,
+                ))
+                # Per-model row: swatch + name + count + fluid bar + pct
+                for m, c in segments:
+                    color = model_color(m)
+                    pct = c / total_calls * 100
+                    mix_rows.append(Label(
+                        f" [{color}]██[/] [#FFCC99]{m:<12}[/] "
+                        f"[#FF9900]{c:>5,}[/] [dim]{pct:>4.1f}%[/]",
+                        classes="ops-mix-legend", markup=True,
+                    ))
+                    mix_rows.append(Horizontal(
+                        Static("    ", classes="bar-cap"),
+                        FluidBar(c / total_calls,
+                                 fill_color=color,
+                                 classes="fluid-bar"),
+                        Static("  ", classes="bar-cap"),
+                        classes="ops-mix-model-bar",
+                    ))
+            if stop_counts:
+                mix_rows.append(Label(" ", classes="ops-mix-legend"))
+                mix_rows.append(Label(
+                    " [#9999CC]STOP REASONS[/]",
+                    classes="ops-stat-cell-label", markup=True,
+                ))
+                total_stops = sum(stop_counts.values()) or 1
+                for sr, c in sorted(stop_counts.items(),
+                                    key=lambda x: x[1], reverse=True):
+                    pct = c / total_stops * 100
+                    mix_rows.append(Label(
+                        f" [#CC9966]{sr:<14}[/] [#FF9900]{c:>5,}[/] "
+                        f"[dim]{pct:>4.1f}%[/]",
+                        classes="ops-mix-legend", markup=True,
+                    ))
+            mix_panel = Vertical(*mix_rows, classes="ops-panel ops-panel-half")
+            mix_panel.border_title = "◖ MODEL MIX ◗"
+            side_by_side_children.append(mix_panel)
+
+        if side_by_side_children:
+            stats_children.append(Horizontal(
+                *side_by_side_children, classes="ops-side-by-side",
+            ))
+
+        # ── Call log ──
+        log_children: list[Widget] = [Label(
+            f"   {'TIME':<8} {'MODEL':<12} {'IN':>5} {'OUT':>5} "
+            f"{'CACHE':>11} {'COST':>7} {'·':<8} {'↳':<1} "
+            f"{'TOOLS':<8} {'PROJECT':<14} PROMPT",
+            classes="ops-log-header",
+        )]
+
+        row_count = min(100, len(entries))
+        if self._selected_row >= row_count:
+            self._selected_row = row_count - 1 if row_count else -1
+
+        visible = entries[:row_count]
+        # Anchor = end_turn boundary (final reply in a turn). Within a run of
+        # tool_use rows belonging to the same user prompt, only the end_turn
+        # row repeats the prompt text; earlier rows show "(continuation)".
+        # For sessions with no end_turn visible (still in-progress), the
+        # most-recent row per session is treated as a "head" anchor.
+        seen_sessions_with_anchor: set = set()
+        # First pass: identify sessions that have an end_turn in view
+        sessions_with_end_turn = set()
+        for _, _, e in visible:
+            if (e.get("stopReason") or "") == "end_turn":
+                sess = e.get("session") or ""
+                if sess:
+                    sessions_with_end_turn.add(sess)
+
+        for idx, (dt, entry_id, e) in enumerate(visible):
+            session = e.get("session") or ""
+            stop = e.get("stopReason") or ""
+            is_turn_end = stop == "end_turn"
+            # Head-anchor: first (newest) row of a session that has NO end_turn in view
+            is_session_head = (
+                session
+                and session not in sessions_with_end_turn
+                and session not in seen_sessions_with_anchor
+            )
+            if is_turn_end or is_session_head:
+                if session:
+                    seen_sessions_with_anchor.add(session)
+                is_anchor = True
+            else:
+                is_anchor = False
+
+            short_m = short_model(e.get("model"))
+            color = model_color(short_m)
+            tok_in = format_number(e.get(FIELD_TOKENS_IN, 0))
+            tok_out = format_number(e.get(FIELD_TOKENS_OUT, 0))
+            cr = e.get(FIELD_CACHE_READS, 0)
+            cw = e.get(FIELD_CACHE_WRITES, 0)
+            cache_str = f"{format_number(cr)}/{format_number(cw)}"
+            cost_val = e.get(FIELD_COST, 0)
+            cost = format_cost(cost_val)
+            bar = cost_bar(cost_val, max_log_cost)
+            proj = short_project(e.get("project", ""))[:14]
+            is_subagent = bool(e.get("isSubagent"))
+            kind_marker = "[#9999CC]↳[/]" if is_subagent else " "
+            time_str = dt.strftime("%H:%M:%S")
+            tools_str = short_tools(e.get("tools") or [])[:8]
+            preview = row_preview_text(e) if is_anchor else "[dim]  ⋮[/]"
+            is_new = entry_id in self._new_entry_ids
+            is_selected = idx == self._selected_row
+            if is_selected:
+                marker = "►"
+            elif is_anchor:
+                marker = "▶" if is_turn_end else "◆"
+            elif is_new:
+                marker = "★"
+            else:
+                marker = " "
+
+            row_classes = "ops-log-row"
+            if is_selected:
+                row_classes += " ops-log-row-selected"
+            elif is_new:
+                row_classes += " ops-log-row-new"
+            elif not is_anchor:
+                row_classes += " ops-log-row-cont"
+            elif is_subagent:
+                row_classes += " ops-log-row-subagent"
+
+            log_children.append(LogRow(
+                f"{marker} {time_str:<8} [{color}]{short_m:<12}[/] "
+                f"{tok_in:>5} {tok_out:>5} {cache_str:>11} {cost:>7} "
+                f"{bar:<8} {kind_marker} {tools_str:<8} {proj:<14} {preview}",
+                classes=row_classes,
+                markup=True,
+                row_index=idx,
+            ))
+
+        log_panel = Vertical(*log_children, classes="ops-panel ops-panel-log")
+        log_panel.border_title = "◖ CALL LOG ◗"
+        log_panel.border_subtitle = f"{row_count} most recent"
+        stats_children.append(log_panel)
+
+        return Vertical(*stats_children, classes="chart-panel")
 
 
 if __name__ == "__main__":

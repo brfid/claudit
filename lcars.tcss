@@ -120,39 +120,63 @@ Screen {
 #overview-panel {
     layout: grid;
     grid-size: 3 2;
+    grid-columns: 1fr 1fr 1fr;
     grid-rows: 1fr 1fr;
-    grid-gutter: 1;
+    grid-gutter: 1 1;
     padding: 1;
     height: 1fr;
 }
 
 .stat-box {
+    width: 100%;
     height: 100%;
-    min-height: 9;
+    min-height: 10;
     border: round #CC6699;
-    padding: 1 2;
+    padding: 0 1;
     background: #0a0a0a;
+    layout: vertical;
+    content-align: left top;
 }
 
 .stat-box .stat-label {
+    width: 100%;
+    height: 1;
     color: #9999CC;
     text-style: bold;
+    text-align: left;
+    padding: 0;
 }
 
 .stat-box .stat-value {
+    width: 100%;
+    height: 1;
     color: #FF9900;
     text-style: bold;
+    text-align: left;
+    padding: 0;
 }
 
 .stat-box .stat-detail {
+    width: 100%;
+    height: 1;
     color: #CC9966;
+    text-align: left;
+    padding: 0;
+}
+
+.stat-box .spark-caption {
+    width: 100%;
+    height: 1;
+    color: #666699;
+    text-style: italic;
+    text-align: left;
+    padding: 0;
 }
 
 .stat-box Sparkline {
-    height: 3;
-    margin-top: 1;
-    margin-left: 0;
-    margin-right: 0;
+    width: 100%;
+    height: 2;
+    margin: 1 0 0 0;
 }
 
 Sparkline {
@@ -196,5 +220,259 @@ Sparkline > .sparkline--min-color {
     color: #9999CC;
     padding: 0 1;
     background: #000000;
+}
+
+/* ── OPS tab ── */
+
+.ops-section-title {
+    height: 1;
+    color: #FF9900;
+    text-style: bold;
+    padding: 0 1;
+}
+
+.ops-section-line {
+    height: 1;
+    color: #9999CC;
+    padding: 0 1;
+}
+
+.ops-kv-line {
+    height: 1;
+    color: #CC9966;
+    padding: 0 1;
+}
+
+/* ── Bordered panels with LCARS curves ── */
+
+.ops-panel {
+    border: round #CC6699;
+    padding: 0 1;
+    background: #0a0a0a;
+    height: auto;
+    border-title-color: #FF9900;
+    border-title-style: bold;
+    border-subtitle-color: #9999CC;
+}
+
+.ops-panel-session {
+    height: auto;
+    min-height: 11;
+    margin: 0 0 1 0;
+    padding: 1 1;
+}
+
+.ops-stat-row {
+    height: 5;
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+.ops-stat-cell {
+    width: 1fr;
+    height: 5;
+    padding: 0 0 0 1;
+    background: #0a0a0a;
+    border-left: outer #CC6699;
+    border-top: hkey #CC6699;
+}
+
+.ops-stat-cell-alt {
+    border-left: outer #9999CC;
+    border-top: hkey #9999CC;
+}
+
+.ops-stat-cell-accent {
+    border-left: outer #FF9900;
+    border-top: hkey #FF9900;
+}
+
+.ops-stat-cell-label {
+    height: 1;
+    color: #9999CC;
+    text-style: bold;
+}
+
+.ops-stat-cell-value {
+    height: 2;
+    color: #FF9900;
+    text-style: bold;
+    content-align: left middle;
+}
+
+.ops-stat-cell-detail {
+    height: 1;
+    color: #CC9966;
+}
+
+.ops-hourly-wrap {
+    height: 4;
+    width: 100%;
+    border: round #CC6699;
+    border-title-color: #FF9900;
+    border-title-style: bold;
+    border-subtitle-color: #9999CC;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+.ops-hourly-spark {
+    height: 1;
+    width: 100%;
+    layout: horizontal;
+}
+
+.hourly-cell {
+    width: 1fr;
+    height: 1;
+    content-align: center middle;
+    background: #050505;
+}
+
+.hourly-cell-mark {
+    background: #15151f;
+}
+
+.ops-hourly-axis {
+    height: 1;
+    width: 100%;
+    layout: horizontal;
+}
+
+.hourly-axis {
+    width: 1fr;
+    height: 1;
+    content-align: center middle;
+}
+
+/* Fluid bar components */
+.fluid-bar {
+    width: 1fr;
+    height: 1;
+}
+
+.bar-cap {
+    width: auto;
+    height: 1;
+}
+
+.ops-mix-model-bar {
+    height: 1;
+    width: 100%;
+    margin-bottom: 0;
+}
+
+.ops-hourly-spark > .sparkline--max-color {
+    color: #FF9900;
+}
+
+.ops-hourly-spark > .sparkline--min-color {
+    color: #CC6699;
+}
+
+.ops-project-name {
+    height: 1;
+    color: #FFCC99;
+    padding: 0 1;
+}
+
+.ops-project-bar {
+    height: 1;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+.ops-mix-bar {
+    height: 1;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+.ops-mix-legend {
+    height: 1;
+    padding: 0 1;
+}
+
+.ops-side-by-side {
+    height: auto;
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+.ops-panel-half {
+    width: 1fr;
+    height: auto;
+    min-height: 5;
+    margin: 0 1 0 0;
+}
+
+.ops-panel-half:last-of-type {
+    margin-right: 0;
+}
+
+.ops-panel-log {
+    height: auto;
+}
+
+.ops-project-row {
+    height: 1;
+    color: #FFCC99;
+    padding: 0 1;
+}
+
+.ops-log-header {
+    height: 1;
+    color: #9999CC;
+    text-style: bold;
+    padding: 0 1;
+}
+
+.ops-log-row {
+    height: 1;
+    color: #CC9966;
+    padding: 0 1;
+}
+
+.ops-log-row-new {
+    color: #FFCC99;
+    text-style: bold;
+}
+
+.ops-log-row-subagent {
+    color: #9999CC;
+}
+
+.ops-log-row-cont {
+    color: #8a7b5c;
+}
+
+.ops-log-row-selected {
+    background: #FF9900;
+    color: #000000;
+    text-style: bold;
+}
+
+.ops-log-row:hover {
+    background: #333333;
+}
+
+/* ── Entry detail modal ── */
+
+EntryDetailScreen {
+    align: center middle;
+}
+
+#entry-detail-box {
+    width: 80;
+    height: auto;
+    max-height: 80%;
+    border: round #FF9900;
+    background: #0a0a0a;
+    padding: 1 2;
+}
+
+#entry-detail-body {
+    color: #FFCC99;
+    height: auto;
 }
 

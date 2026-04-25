@@ -13,28 +13,47 @@ import os
 import platform
 import tempfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# Model-specific pricing (per million tokens)
-# Adjust these if your Bedrock/API pricing differs
-MODEL_PRICING = {
-    'claude-opus-4-6': {
-        'input': 5.00,
-        'output': 25.00,
-        'cache_write': 6.25,
-        'cache_read': 0.50,
-    },
-    'claude-sonnet-4-5-20250929': {
-        'input': 3.00,
-        'output': 15.00,
-        'cache_write': 3.75,
-        'cache_read': 0.30,
-    },
+# Model-specific pricing (USD per million tokens)
+# Source: https://www.anthropic.com/pricing  (verify quarterly — update here if stale)
+# cache_write is 5-minute ephemeral cache; 1h cache is 2x that rate (not tracked here).
+OPUS_PRICING = {
+    'input': 15.00, 'output': 75.00, 'cache_write': 18.75, 'cache_read': 1.50,
+}
+SONNET_PRICING = {
+    'input': 3.00, 'output': 15.00, 'cache_write': 3.75, 'cache_read': 0.30,
+}
+HAIKU_PRICING = {
+    'input': 1.00, 'output': 5.00, 'cache_write': 1.25, 'cache_read': 0.10,
 }
 
-DEFAULT_PRICING = MODEL_PRICING['claude-sonnet-4-5-20250929']
+MODEL_PRICING = {
+    # Opus family
+    'claude-opus-4-6': OPUS_PRICING,
+    'claude-opus-4-7': OPUS_PRICING,
+    # Sonnet family
+    'claude-sonnet-4-5-20250929': SONNET_PRICING,
+    'claude-sonnet-4-6': SONNET_PRICING,
+    # Haiku family
+    'claude-haiku-4-5-20251001': HAIKU_PRICING,
+}
+
+DEFAULT_PRICING = SONNET_PRICING
+
+
+def _infer_pricing_by_family(model: str) -> Optional[Dict[str, float]]:
+    """Fallback: infer pricing from family name if exact model ID is unknown."""
+    if 'opus' in model:
+        return OPUS_PRICING
+    if 'sonnet' in model:
+        return SONNET_PRICING
+    if 'haiku' in model:
+        return HAIKU_PRICING
+    return None
 
 # Field name constants
 FIELD_TOKENS_IN = 'tokensIn'
@@ -52,24 +71,29 @@ FIELD_NAMES = [
 
 FLOAT_FIELDS = {FIELD_COST, FIELD_CACHE_SAVINGS}
 
+SOURCE_MAP = {'claude-code': 'cc', 'cline': 'cline'}
+
 # Column configuration: (field_name, header, width, format_func)
 COLUMNS = [
     ('date', 'Date', 12, str),
-    ('requests', 'Requests', 10, lambda x: format_number(int(x))),
-    ('tokensIn', 'Tokens In', 12, lambda x: format_tokens(int(x))),
-    ('tokensOut', 'Tokens Out', 12, lambda x: format_tokens(int(x))),
-    ('cacheWrites', 'Cache W', 12, lambda x: format_tokens(int(x))),
-    ('cacheReads', 'Cache R', 12, lambda x: format_tokens(int(x))),
+    ('requests', 'Reqs', 8, lambda x: format_number(int(x))),
+    ('tokensIn', 'In (tok)', 10, lambda x: format_number(int(x))),
+    ('tokensOut', 'Out (tok)', 10, lambda x: format_number(int(x))),
+    ('cacheWrites', 'CW (tok)', 10, lambda x: format_number(int(x))),
+    ('cacheReads', 'CR (tok)', 10, lambda x: format_number(int(x))),
     ('cacheSavings', 'Saved ($)', 10, lambda x: format_cost(x)),
     ('cost', 'Cost ($)', 10, lambda x: format_cost(x)),
 ]
 
 
 def get_model_pricing(model: Optional[str]) -> Dict[str, float]:
-    """Get pricing for a specific model, falling back to defaults."""
-    if model and model in MODEL_PRICING:
+    """Get pricing for a specific model, falling back to family, then defaults."""
+    if not model:
+        return DEFAULT_PRICING
+    if model in MODEL_PRICING:
         return MODEL_PRICING[model]
-    return DEFAULT_PRICING
+    inferred = _infer_pricing_by_family(model)
+    return inferred if inferred is not None else DEFAULT_PRICING
 
 
 def calculate_cost(tokens_in: int, tokens_out: int, cache_writes: int,
@@ -269,7 +293,8 @@ def file_needs_processing(filepath: Path, state: Dict) -> Tuple[bool, int]:
     return True, stored.get("byte_offset", 0)
 
 
-def update_file_state(state: Dict, filepath: Path, byte_offset: int) -> None:
+def update_file_state(state: Dict, filepath: Path, byte_offset: int,
+                      last_user_text: str = "") -> None:
     try:
         stat = filepath.stat()
     except OSError:
@@ -278,16 +303,31 @@ def update_file_state(state: Dict, filepath: Path, byte_offset: int) -> None:
         "byte_offset": byte_offset,
         "size": stat.st_size,
         "mtime": stat.st_mtime,
+        "last_user_text": last_user_text,
     }
 
 
+def get_stored_user_text(state: Dict, filepath: Path) -> str:
+    """Retrieve last captured user text for a file, for seeding incremental resumes."""
+    return state.get("files", {}).get(str(filepath), {}).get("last_user_text", "")
+
+
 def ingest(ledger: Dict[str, Dict], new_entries: Dict[str, Dict]) -> int:
-    """Merge new entries into ledger. Returns count of entries added."""
+    """Merge new entries into ledger. Returns count of entries added.
+
+    For existing entries, fills in any keys that are missing (schema evolution:
+    e.g., model/project/prompt_preview added after original ingest).
+    """
     added = 0
     for entry_id, entry_data in new_entries.items():
         if entry_id not in ledger:
             ledger[entry_id] = entry_data
             added += 1
+        else:
+            existing = ledger[entry_id]
+            for k, v in entry_data.items():
+                if k not in existing and v not in (None, ""):
+                    existing[k] = v
     return added
 
 
@@ -324,12 +364,15 @@ def run_ingest(ledger_path: Path, ledger: Dict, source: str = "all",
 def get_cline_data_dir() -> Optional[Path]:
     home = Path.home()
     system = platform.system()
+    cline_ext = "saoudrizwan.claude-dev"
     if system == "Darwin":
-        p = home / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev"
+        p = (home / "Library" / "Application Support" / "Code" / "User"
+             / "globalStorage" / cline_ext)
     elif system == "Windows":
-        p = home / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev"
+        p = (home / "AppData" / "Roaming" / "Code" / "User"
+             / "globalStorage" / cline_ext)
     elif system == "Linux":
-        p = home / ".config" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev"
+        p = home / ".config" / "Code" / "User" / "globalStorage" / cline_ext
     else:
         return None
     return p if p.exists() else None
@@ -461,14 +504,78 @@ def find_claude_code_session_files(base_path: Path) -> List[Path]:
     )
 
 
+def _project_from_session_path(session_file: Path) -> str:
+    """Derive a readable project path from a CC session file path.
+
+    ~/.claude/projects/-Users-bfidler-src-techdocs-tools/abc.jsonl → ~/src/techdocs-tools
+
+    The slug uses dashes as path separators, but real directory names can also
+    contain dashes. We greedily match path components from left to right,
+    preferring the longest real directory name at each level.
+    """
+    projects_dir = get_claude_code_dir() / "projects"
+    try:
+        rel = session_file.relative_to(projects_dir)
+        slug = rel.parts[0]
+    except (ValueError, IndexError):
+        return ""
+    parts = slug.lstrip("-").split("-")
+    resolved = Path("/")
+    i = 0
+    while i < len(parts):
+        best = None
+        for j in range(len(parts), i, -1):
+            candidate = "-".join(parts[i:j])
+            if (resolved / candidate).is_dir():
+                best = candidate
+                i = j
+                break
+        if best is None:
+            best = parts[i]
+            i += 1
+        resolved = resolved / best
+    result = str(resolved)
+    home = str(Path.home())
+    if result.startswith(home):
+        result = "~" + result[len(home):]
+    return result
+
+
+def _extract_user_text(obj: Dict) -> str:
+    """Extract plain text from a CC 'user' JSONL record, skipping tool results.
+
+    User messages can be plain strings, lists of content blocks, or tool_result
+    wrappers. We only want genuine typed-by-human text.
+    """
+    msg = obj.get('message', {})
+    content = msg.get('content')
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') == 'text':
+                parts.append(block.get('text', ''))
+        return ' '.join(p for p in parts if p)
+    return ''
+
+
 def parse_claude_code_session(session_file: Path, verbose: bool = False,
-                              seek_offset: int = 0) -> Tuple[Dict[str, Dict], int]:
+                              seek_offset: int = 0,
+                              initial_user_text: str = "") -> Tuple[Dict[str, Dict], int, str]:
     """Parse a Claude Code session JSONL file, extracting final usage per API call.
 
-    Returns (entries, final_byte_offset).
+    initial_user_text seeds `last_user_text` so incremental resumes can still
+    attach a prompt preview to assistant messages whose originating user line
+    was parsed in a prior pass.
+
+    Returns (entries, final_byte_offset, final_user_text).
     """
     final_messages = {}
     last_good_offset = seek_offset
+    last_user_text = initial_user_text
 
     try:
         with open(session_file, 'r') as f:
@@ -486,7 +593,14 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
 
                 last_good_offset = line_end
 
-                if obj.get('type') != 'assistant':
+                obj_type = obj.get('type')
+                if obj_type == 'user':
+                    text = _extract_user_text(obj)
+                    if text and not text.startswith('<'):
+                        last_user_text = text
+                    continue
+
+                if obj_type != 'assistant':
                     continue
 
                 msg = obj.get('message', {})
@@ -498,18 +612,31 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
                 if not msg_id:
                     continue
 
+                # Extract tool names from assistant content blocks
+                tools = []
+                content = msg.get('content')
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get('type') == 'tool_use':
+                            name = block.get('name')
+                            if name:
+                                tools.append(name)
+
                 stop_reason = msg.get('stop_reason')
                 if stop_reason is not None:
                     final_messages[msg_id] = {
                         'model': msg.get('model'),
                         'usage': usage,
                         'timestamp': obj.get('timestamp'),
+                        'stop_reason': stop_reason,
+                        'prompt_preview': last_user_text[:80],
+                        'tools': tools,
                     }
 
     except (IOError, OSError) as e:
         if verbose:
             print(f"Warning: Could not read {session_file}: {e}")
-        return {}, seek_offset
+        return {}, seek_offset, last_user_text
 
     entries = {}
     for msg_id, data in final_messages.items():
@@ -529,9 +656,17 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
             total_input = tokens_in + cache_writes + cache_reads
 
             entry_id = f"cc:{msg_id}"
+            is_subagent = 'subagents' in session_file.parts
             entries[entry_id] = {
                 'source': 'cc',
                 'ts': dt.isoformat(),
+                'model': model,
+                'project': _project_from_session_path(session_file),
+                'session': session_file.stem,
+                'isSubagent': is_subagent,
+                'stopReason': data.get('stop_reason'),
+                'promptPreview': data.get('prompt_preview', ''),
+                'tools': data.get('tools', []),
                 FIELD_TOKENS_IN: tokens_in,
                 FIELD_TOKENS_OUT: tokens_out,
                 FIELD_CACHE_WRITES: cache_writes,
@@ -542,12 +677,18 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
         except (ValueError, KeyError, TypeError):
             continue
 
-    return entries, last_good_offset
+    return entries, last_good_offset, last_user_text
 
 
 def collect_claude_code_data(verbose: bool,
-                            ingest_state: Optional[Dict] = None) -> Dict[str, Dict]:
-    """Collect cost entries from all Claude Code sessions."""
+                            ingest_state: Optional[Dict] = None,
+                            max_workers: int = 8) -> Dict[str, Dict]:
+    """Collect cost entries from all Claude Code sessions.
+
+    Files that need processing are parsed in parallel (I/O bound: reading JSONL
+    and json.loads per line). Ingest state is updated serially afterwards to
+    avoid races on the shared dict.
+    """
     cc_dir = get_claude_code_dir()
     if not cc_dir.exists():
         if verbose:
@@ -560,8 +701,7 @@ def collect_claude_code_data(verbose: bool,
             print("Claude Code: no session files found")
         return {}
 
-    all_entries = {}
-    parsed = 0
+    work = []
     skipped = 0
     for sf in session_files:
         if ingest_state is not None:
@@ -571,18 +711,40 @@ def collect_claude_code_data(verbose: bool,
                 continue
         else:
             offset = 0
+        work.append((sf, offset))
 
-        entries, final_offset = parse_claude_code_session(
-            sf, verbose=verbose, seek_offset=offset)
-        all_entries.update(entries)
-        parsed += 1
+    all_entries: Dict[str, Dict] = {}
+    dup_count = 0
 
-        if ingest_state is not None:
-            update_file_state(ingest_state, sf, final_offset)
+    def _parse(item):
+        sf, offset, seed = item
+        return sf, parse_claude_code_session(
+            sf, verbose=verbose, seek_offset=offset, initial_user_text=seed)
+
+    # Seed each file with its previously-stored last_user_text when resuming
+    work_with_seed = [
+        (sf, offset,
+         get_stored_user_text(ingest_state, sf) if ingest_state is not None and offset > 0 else "")
+        for sf, offset in work
+    ]
+
+    if work_with_seed:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for sf, (entries, final_offset, final_user_text) in pool.map(_parse, work_with_seed):
+                for eid, edata in entries.items():
+                    if eid in all_entries:
+                        dup_count += 1
+                    all_entries[eid] = edata
+                if ingest_state is not None:
+                    update_file_state(ingest_state, sf, final_offset,
+                                      last_user_text=final_user_text)
 
     if verbose:
-        print(f"Claude Code: parsed {parsed} sessions ({skipped} skipped), "
+        print(f"Claude Code: parsed {len(work)} sessions ({skipped} skipped), "
               f"{len(all_entries)} API calls")
+        if dup_count > 0:
+            print(f"  Note: {dup_count} msg_id collisions across sessions "
+                  f"(expected for resumed sessions)")
 
     return all_entries
 
@@ -606,16 +768,23 @@ def entry_local_dt(entry: Dict) -> datetime:
 def aggregate_by_day(ledger: Dict[str, Dict],
                      source_filter: Optional[str] = None,
                      date_from: Optional[str] = None,
-                     date_to: Optional[str] = None) -> Dict[str, Dict]:
+                     date_to: Optional[str] = None,
+                     project_filter: Optional[str] = None) -> Dict[str, Dict]:
     """Aggregate ledger entries by day, optionally filtering by source and date range.
 
     date_from/date_to are ISO date strings (YYYY-MM-DD), inclusive.
+    project_filter matches as case-insensitive substring on entry['project'].
     """
     daily_data = defaultdict(init_field_dict)
+    proj_needle = project_filter.lower() if project_filter else None
 
     for entry_id, entry in ledger.items():
         if source_filter and entry.get('source') != source_filter:
             continue
+
+        if proj_needle:
+            if proj_needle not in entry.get('project', '').lower():
+                continue
 
         try:
             dt = entry_local_dt(entry)
@@ -707,6 +876,22 @@ Examples:
         help='data source (default: all)'
     )
     parser.add_argument(
+        '--project', metavar='SUBSTRING',
+        help='filter to entries whose project path matches this substring'
+    )
+    parser.add_argument(
+        '--from', dest='date_from', metavar='YYYY-MM-DD',
+        help='include only entries on or after this date'
+    )
+    parser.add_argument(
+        '--to', dest='date_to', metavar='YYYY-MM-DD',
+        help='include only entries on or before this date'
+    )
+    parser.add_argument(
+        '--stats', action='store_true',
+        help='print ledger stats (entry count, size, date range) and exit'
+    )
+    parser.add_argument(
         '--cached', action='store_true',
         help='report from stored data only, skip scanning live sources'
     )
@@ -731,6 +916,58 @@ Examples:
         help='launch interactive dashboard (requires textual, textual-plotext)'
     )
     return parser.parse_args()
+
+
+def print_ledger_stats(ledger_path: Path, ledger: Dict[str, Dict]) -> None:
+    """Print ledger file stats — size, entry counts, date range, projects."""
+    try:
+        size_bytes = ledger_path.stat().st_size
+    except OSError:
+        size_bytes = 0
+
+    if size_bytes >= 1024 * 1024:
+        size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+    elif size_bytes >= 1024:
+        size_str = f"{size_bytes / 1024:.1f} KB"
+    else:
+        size_str = f"{size_bytes} B"
+
+    by_source: Dict[str, int] = {}
+    by_project: Dict[str, int] = {}
+    min_dt: Optional[datetime] = None
+    max_dt: Optional[datetime] = None
+    subagent_count = 0
+
+    for entry in ledger.values():
+        src = entry.get('source', '?')
+        by_source[src] = by_source.get(src, 0) + 1
+        proj = entry.get('project', '')
+        if proj:
+            by_project[proj] = by_project.get(proj, 0) + 1
+        if entry.get('isSubagent'):
+            subagent_count += 1
+        try:
+            dt = entry_local_dt(entry)
+            if min_dt is None or dt < min_dt:
+                min_dt = dt
+            if max_dt is None or dt > max_dt:
+                max_dt = dt
+        except (ValueError, KeyError):
+            continue
+
+    print(f"Ledger file: {ledger_path}")
+    print(f"Size:        {size_str}")
+    print(f"Entries:     {len(ledger):,}")
+    for src, count in sorted(by_source.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {src:<12} {count:,}")
+    if subagent_count:
+        print(f"  subagents   {subagent_count:,} (subset of cc)")
+    if min_dt and max_dt:
+        print(f"Range:       {min_dt.strftime('%Y-%m-%d')} → {max_dt.strftime('%Y-%m-%d')}")
+    if by_project:
+        print(f"Projects:    {len(by_project)}")
+        for proj, count in sorted(by_project.items(), key=lambda x: x[1], reverse=True)[:10]:
+            print(f"  {count:>6,}  {proj}")
 
 
 def compute_date_window(days: Optional[int]) -> Optional[str]:
@@ -771,20 +1008,26 @@ def main():
     ledger_path = get_ledger_path(args.ledger_path)
     ledger = load_ledger(ledger_path)
 
+    if args.stats:
+        print_ledger_stats(ledger_path, ledger)
+        return 0
+
     added = run_ingest(ledger_path, ledger, source=args.source,
                        no_ingest=args.cached, force_ingest=args.rescan,
                        verbose=args.verbose)
     if added > 0 and not args.quiet:
         print(f"Ledger: {added} new entries ({len(ledger)} total)")
 
-    source_map = {'claude-code': 'cc', 'cline': 'cline'}
-    source_filter = None if args.source == 'all' else source_map.get(args.source, args.source)
+    source_filter = None if args.source == 'all' else SOURCE_MAP.get(args.source, args.source)
 
     limit_days = None if args.all else args.days
-    date_from = compute_date_window(limit_days)
+    # Explicit --from / --to override the days-based window
+    date_from = args.date_from or compute_date_window(limit_days)
+    date_to = args.date_to
 
     daily_data = aggregate_by_day(ledger, source_filter=source_filter,
-                                  date_from=date_from)
+                                  date_from=date_from, date_to=date_to,
+                                  project_filter=args.project)
 
     # Build title from what's actually in the filtered data
     sources_in_data = set()
