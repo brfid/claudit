@@ -683,14 +683,14 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  ai_cost_tracker.py                       # Both sources, last 30 active days
-  ai_cost_tracker.py --days 7              # Last 7 active days
-  ai_cost_tracker.py --all                 # All days with activity
-  ai_cost_tracker.py --source cline        # Cline only
-  ai_cost_tracker.py --source claude-code  # Claude Code only
-  ai_cost_tracker.py --tui                 # Interactive dashboard
-  ai_cost_tracker.py --cached              # Report from stored data, skip scanning
-  ai_cost_tracker.py --rescan              # Rescan all files from scratch
+  claudit.py                       # Both sources, last 30 active days
+  claudit.py --days 7              # Last 7 active days
+  claudit.py --all                 # All days with activity
+  claudit.py --source cline        # Cline only
+  claudit.py --source claude-code  # Claude Code only
+  claudit.py --tui                 # Interactive dashboard
+  claudit.py --cached              # Report from stored data, skip scanning
+  claudit.py --rescan              # Rescan all files from scratch
         """
     )
     parser.add_argument(

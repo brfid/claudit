@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_cost_tracker import (
+from claudit import (
     aggregate_by_day,
     compute_date_window,
     file_needs_processing,

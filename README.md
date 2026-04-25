@@ -19,7 +19,7 @@ For the interactive dashboard:
 No package installation required. Clone the repo and run directly:
 
 ```bash
-python3 ai_cost_tracker.py
+python3 claudit.py
 ```
 
 To install dashboard dependencies:
@@ -31,7 +31,7 @@ pip install textual textual-plotext
 Optional: add a shell alias for quick access:
 
 ```bash
-alias claudit="python3 /path/to/ai_cost_tracker.py"
+alias claudit="python3 /path/to/claudit.py"
 ```
 
 ## Get started
@@ -39,13 +39,13 @@ alias claudit="python3 /path/to/ai_cost_tracker.py"
 Run with no arguments to see the last 30 active days across all sources:
 
 ```bash
-python3 ai_cost_tracker.py
+python3 claudit.py
 ```
 
 Launch the interactive dashboard:
 
 ```bash
-python3 ai_cost_tracker.py --tui
+python3 claudit.py --tui
 ```
 
 ## Usage
@@ -53,15 +53,15 @@ python3 ai_cost_tracker.py --tui
 ### Filter by time range
 
 ```bash
-python3 ai_cost_tracker.py --days 7     # Last 7 active days
-python3 ai_cost_tracker.py --all         # All days with activity
+python3 claudit.py --days 7     # Last 7 active days
+python3 claudit.py --all         # All days with activity
 ```
 
 ### Filter by source
 
 ```bash
-python3 ai_cost_tracker.py --source cline        # Cline only
-python3 ai_cost_tracker.py --source claude-code   # Claude Code only
+python3 claudit.py --source cline        # Cline only
+python3 claudit.py --source claude-code   # Claude Code only
 ```
 
 ### Control scanning behavior
@@ -69,8 +69,8 @@ python3 ai_cost_tracker.py --source claude-code   # Claude Code only
 Each run scans live data from your AI assistants and merges it into a local ledger. You can control this:
 
 ```bash
-python3 ai_cost_tracker.py --cached    # Skip scanning, report from stored data only
-python3 ai_cost_tracker.py --rescan    # Ignore stored state, rescan everything
+python3 claudit.py --cached    # Skip scanning, report from stored data only
+python3 claudit.py --rescan    # Ignore stored state, rescan everything
 ```
 
 ### Other options
