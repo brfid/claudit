@@ -7,6 +7,7 @@ from ops_data import (
     aggregate_today,
     collect_entries,
     cost_bar,
+    group_by_prompt,
     hourly_cost_today,
     model_color,
     percentile,
@@ -14,6 +15,7 @@ from ops_data import (
     short_model,
     short_project,
     short_tools,
+    subagent_cost_rollup,
 )
 
 
@@ -278,3 +280,168 @@ class TestRowPreviewText:
     def test_collapses_whitespace(self):
         r = row_preview_text({"promptPreview": "hi\n\n\t  there"})
         assert "hi there" in r
+
+
+# ── group_by_prompt ───────────────────────────────────────────────────────
+
+class TestGroupByPrompt:
+    def _entries(self):
+        t0 = datetime.now()
+        return [
+            (t0, "cc:1", {
+                "source": "cc", "ts": t0.isoformat(),
+                "promptId": "p1", "session": "s1",
+                "cost": 1.0, "tokensIn": 100, "tokensOut": 50,
+                "cacheReads": 0, "cacheWrites": 0,
+                "tools": ["Read"], "stopReason": "tool_use",
+                "model": "claude-opus-4-6", "promptPreview": "anchor text",
+                "isSubagent": False, "project": "p",
+            }),
+            (t0 - timedelta(seconds=5), "cc:2", {
+                "source": "cc", "ts": t0.isoformat(),
+                "promptId": "p1", "session": "s1",
+                "cost": 2.0, "tokensIn": 200, "tokensOut": 100,
+                "cacheReads": 0, "cacheWrites": 0,
+                "tools": ["Edit"], "stopReason": "end_turn",
+                "model": "claude-opus-4-6", "promptPreview": "",
+                "isSubagent": False, "project": "p",
+            }),
+            (t0 - timedelta(minutes=2), "cc:3", {
+                "source": "cc", "ts": t0.isoformat(),
+                "promptId": "p2", "session": "s1",
+                "cost": 0.5, "tokensIn": 50, "tokensOut": 25,
+                "cacheReads": 0, "cacheWrites": 0,
+                "tools": [], "stopReason": "end_turn",
+                "model": "claude-sonnet-4-5", "promptPreview": "second prompt",
+                "isSubagent": False, "project": "p",
+            }),
+        ]
+
+    def test_groups_share_prompt_id(self):
+        groups = group_by_prompt(self._entries())
+        assert len(groups) == 2
+        by_id = {g["prompt_id"]: g for g in groups}
+        assert by_id["p1"]["turns"] == 2
+        assert by_id["p1"]["cost"] == 3.0
+        assert by_id["p2"]["turns"] == 1
+
+    def test_newest_first(self):
+        groups = group_by_prompt(self._entries())
+        assert groups[0]["prompt_id"] == "p1"
+        assert groups[1]["prompt_id"] == "p2"
+
+    def test_tool_list_aggregates(self):
+        groups = group_by_prompt(self._entries())
+        by_id = {g["prompt_id"]: g for g in groups}
+        assert set(by_id["p1"]["tools"]) == {"Read", "Edit"}
+
+    def test_spawn_count_increments(self):
+        entries = self._entries()
+        entries.append((
+            datetime.now(), "spawn:abc",
+            {"source": "agent_spawn", "promptId": "p1",
+             "subagentType": "Explore"},
+        ))
+        groups = group_by_prompt(entries)
+        by_id = {g["prompt_id"]: g for g in groups}
+        assert by_id["p1"]["spawn_count"] == 1
+
+    def test_orphan_entries(self):
+        """Entries without promptId each become their own group."""
+        now = datetime.now()
+        entries = [
+            (now, "cc:o1", {
+                "source": "cc", "cost": 1.0, "session": "s1",
+                "tokensIn": 0, "tokensOut": 0,
+                "cacheReads": 0, "cacheWrites": 0,
+                "tools": [], "stopReason": "end_turn",
+            }),
+            (now - timedelta(seconds=1), "cc:o2", {
+                "source": "cc", "cost": 2.0, "session": "s1",
+                "tokensIn": 0, "tokensOut": 0,
+                "cacheReads": 0, "cacheWrites": 0,
+                "tools": [], "stopReason": "end_turn",
+            }),
+        ]
+        groups = group_by_prompt(entries)
+        assert len(groups) == 2
+
+
+# ── subagent_cost_rollup ──────────────────────────────────────────────────
+
+class TestSubagentCostRollup:
+    def test_empty(self):
+        assert subagent_cost_rollup([]) == {}
+
+    def test_rolls_up_subagent_to_parent(self):
+        today = datetime.now()
+        entries = [
+            (today, "cc:1", {
+                "source": "cc", "isSubagent": True,
+                "parentSession": "parent-1", "cost": 1.5,
+                "ts": today.isoformat(),
+            }),
+            (today, "cc:2", {
+                "source": "cc", "isSubagent": True,
+                "parentSession": "parent-1", "cost": 0.5,
+                "ts": today.isoformat(),
+            }),
+            (today, "cc:3", {
+                "source": "cc", "isSubagent": False,
+                "parentSession": "parent-2", "cost": 99.0,
+                "ts": today.isoformat(),
+            }),
+        ]
+        rollup = subagent_cost_rollup(entries)
+        assert rollup == {"parent-1": 2.0}
+
+    def test_ignores_entries_without_parent(self):
+        today = datetime.now()
+        entries = [
+            (today, "cc:1", {
+                "source": "cc", "isSubagent": True,
+                "parentSession": "", "cost": 1.0,
+                "ts": today.isoformat(),
+            }),
+        ]
+        assert subagent_cost_rollup(entries) == {}
+
+
+# ── aggregate_today subagent tracking ─────────────────────────────────────
+
+class TestAggregateTodaySpawns:
+    def test_spawn_entries_counted_separately(self):
+        now = datetime.now()
+        entries = [
+            (now, "cc:1", {
+                "source": "cc", "ts": now.isoformat(),
+                "cost": 1.0, "tokensIn": 100, "tokensOut": 50,
+                "cacheSavings": 0, "model": "claude-opus-4-6",
+                "project": "/p", "stopReason": "end_turn",
+                "isSubagent": False,
+            }),
+            (now, "spawn:abc", {
+                "source": "agent_spawn", "ts": now.isoformat(),
+                "subagentType": "Explore",
+                "cost": 0, "tokensIn": 0, "tokensOut": 0,
+                "cacheSavings": 0,
+            }),
+            (now, "spawn:def", {
+                "source": "agent_spawn", "ts": now.isoformat(),
+                "subagentType": "general-purpose",
+                "cost": 0, "tokensIn": 0, "tokensOut": 0,
+                "cacheSavings": 0,
+            }),
+            (now, "spawn:ghi", {
+                "source": "agent_spawn", "ts": now.isoformat(),
+                "subagentType": "Explore",
+                "cost": 0, "tokensIn": 0, "tokensOut": 0,
+                "cacheSavings": 0,
+            }),
+        ]
+        s = aggregate_today(entries, short_project, short_model)
+        # Billable count excludes spawns
+        assert s["count"] == 1
+        assert s["spawn_count"] == 3
+        assert s["subagent_type_counts"]["Explore"] == 2
+        assert s["subagent_type_counts"]["general-purpose"] == 1

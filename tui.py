@@ -47,13 +47,13 @@ from ops_data import (
     short_model,
     short_project,
     short_tools,
+    subagent_cost_rollup,
 )
 from ops_widgets import (
     EntryDetailScreen,
     FluidBar,
     HourlyBar,
     LogRow,
-    StackedBar,
     StatBox,
 )
 
@@ -354,6 +354,16 @@ class CostTrackerApp(App):
         tick_labels = [sorted_days[i][5:] for i in tick_positions]
         plt.xticks(tick_positions, tick_labels)
 
+    @staticmethod
+    def _chart_panel(title: str, plot: Widget,
+                     subtitle: str = "") -> Widget:
+        """Standard wrapper: title + optional subtitle + plot, LCARS chart-panel."""
+        children: list[Widget] = [Label(f"  {title}", classes="chart-title")]
+        if subtitle:
+            children.append(Label(f"  {subtitle}", classes="chart-subtitle"))
+        children.append(plot)
+        return Vertical(*children, classes="chart-panel")
+
     # ── Overview tab ──
 
     def _build_overview(self) -> Widget:
@@ -470,18 +480,13 @@ class CostTrackerApp(App):
             plot.refresh()
 
         plot.call_after_refresh(on_mount_chart)
-        return Vertical(
-            Label("  DAILY COST ($)", classes="chart-title"),
-            Label(
-                f"  {sorted_days[0]} → {sorted_days[-1]}  ◥  "
-                f"Total: {format_cost(total_cost)}  ◥  "
-                f"Avg: {format_cost(total_cost / len(costs))}/day"
-                if sorted_days else "",
-                classes="chart-subtitle",
-            ),
-            plot,
-            classes="chart-panel",
+        subtitle = (
+            f"{sorted_days[0]} → {sorted_days[-1]}  ◥  "
+            f"Total: {format_cost(total_cost)}  ◥  "
+            f"Avg: {format_cost(total_cost / len(costs))}/day"
+            if sorted_days else ""
         )
+        return self._chart_panel("DAILY COST ($)", plot, subtitle)
 
     # ── Tokens chart ──
 
@@ -513,11 +518,7 @@ class CostTrackerApp(App):
             plot.refresh()
 
         plot.call_after_refresh(on_mount_chart)
-        return Vertical(
-            Label("  TOKEN USAGE BY DAY", classes="chart-title"),
-            plot,
-            classes="chart-panel",
-        )
+        return self._chart_panel("TOKEN USAGE BY DAY", plot)
 
     # ── Cache chart ──
 
@@ -546,17 +547,12 @@ class CostTrackerApp(App):
             plot.refresh()
 
         plot.call_after_refresh(on_mount_chart)
-        return Vertical(
-            Label("  CACHE PERFORMANCE", classes="chart-title"),
-            Label(
-                f"  Total saved: {format_cost(total_saved)}  ◥  "
-                f"Avg efficiency: {sum(pcts) / len(pcts):.0f}%"
-                if pcts else "",
-                classes="chart-subtitle",
-            ),
-            plot,
-            classes="chart-panel",
+        subtitle = (
+            f"Total saved: {format_cost(total_saved)}  ◥  "
+            f"Avg efficiency: {sum(pcts) / len(pcts):.0f}%"
+            if pcts else ""
         )
+        return self._chart_panel("CACHE PERFORMANCE", plot, subtitle)
 
     # ── Activity heatmap ──
 
@@ -583,16 +579,13 @@ class CostTrackerApp(App):
             plot.refresh()
 
         plot.call_after_refresh(on_mount_chart)
-        return Vertical(
-            Label("  ACTIVITY HEATMAP — REQUESTS (365 days)", classes="chart-title"),
-            Label(
-                f"  {active_days} active days  ◥  "
-                f"Total: {total_requests:,}  ◥  "
-                f"Peak: {peak_day[5:] if peak_day else '—'} ({peak_count:,})",
-                classes="chart-subtitle",
-            ),
-            plot,
-            classes="chart-panel",
+        subtitle = (
+            f"{active_days} active days  ◥  "
+            f"Total: {total_requests:,}  ◥  "
+            f"Peak: {peak_day[5:] if peak_day else '—'} ({peak_count:,})"
+        )
+        return self._chart_panel(
+            "ACTIVITY HEATMAP — REQUESTS (365 days)", plot, subtitle,
         )
 
     # ── Calendar heatmap (GitHub-style) ──
@@ -644,17 +637,15 @@ class CostTrackerApp(App):
             plot.refresh()
 
         plot.call_after_refresh(on_mount_chart)
-        return Vertical(
-            Label("  CALENDAR HEATMAP — DAILY COST (365 days)", classes="chart-title"),
-            Label(
-                f"  {grid_start.strftime('%Y-%m-%d')} → {grid_end.strftime('%Y-%m-%d')}  ◥  "
-                f"{active_days} active days  ◥  "
-                f"Total: {format_cost(total_cost)}  ◥  "
-                f"Peak: {format_cost(max_cost)}",
-                classes="chart-subtitle",
-            ),
-            plot,
-            classes="chart-panel",
+        subtitle = (
+            f"{grid_start.strftime('%Y-%m-%d')} → "
+            f"{grid_end.strftime('%Y-%m-%d')}  ◥  "
+            f"{active_days} active days  ◥  "
+            f"Total: {format_cost(total_cost)}  ◥  "
+            f"Peak: {format_cost(max_cost)}"
+        )
+        return self._chart_panel(
+            "CALENDAR HEATMAP — DAILY COST (365 days)", plot, subtitle,
         )
 
     # ── Spend heatmap (cost by hour × day-of-week) ──
@@ -686,15 +677,9 @@ class CostTrackerApp(App):
             plot.refresh()
 
         plot.call_after_refresh(on_mount_chart)
-        return Vertical(
-            Label("  SPEND HEATMAP — COST BY HOUR × DAY", classes="chart-title"),
-            Label(
-                f"  Peak: {peak_label}  ◥  "
-                f"Total: {format_cost(total_cost)}",
-                classes="chart-subtitle",
-            ),
-            plot,
-            classes="chart-panel",
+        return self._chart_panel(
+            "SPEND HEATMAP — COST BY HOUR × DAY", plot,
+            f"Peak: {peak_label}  ◥  Total: {format_cost(total_cost)}",
         )
 
     # ── Session cost histogram ──
@@ -714,8 +699,7 @@ class CostTrackerApp(App):
                 costs.append(c)
 
         if not costs:
-            return Vertical(Label("  No cost data", classes="chart-title"),
-                            classes="chart-panel")
+            return self._chart_panel("No cost data", Label(""))
 
         costs.sort()
         median = costs[len(costs) // 2]
@@ -829,18 +813,12 @@ class CostTrackerApp(App):
             plot.refresh()
 
         plot.call_after_refresh(on_mount_chart)
-
-        children: list[Widget] = [
-            Label("  CUMULATIVE COST", classes="chart-title"),
-        ]
-        if cumulative:
-            children.append(Label(
-                f"  {sorted_days[0]} → {sorted_days[-1]}  ◥  "
-                f"Total: {format_cost(cumulative[-1])}",
-                classes="chart-subtitle",
-            ))
-        children.append(plot)
-        return Vertical(*children, classes="chart-panel")
+        subtitle = (
+            f"{sorted_days[0]} → {sorted_days[-1]}  ◥  "
+            f"Total: {format_cost(cumulative[-1])}"
+            if cumulative else ""
+        )
+        return self._chart_panel("CUMULATIVE COST", plot, subtitle)
 
     # ── OPS tab ──
 
@@ -934,86 +912,144 @@ class CostTrackerApp(App):
 
         stats_children: list[Widget] = [session_panel]
 
-        # ── Active Projects + Model Mix side-by-side (richer LCARS graphics) ──
+        # ── Projects / Models / Stops / Subagents — 4 side-by-side panels ──
+        #
+        # Unified row format per panel:
+        #   LABEL · VALUE   ◖▓▓▓▓▓░░░░░◗  PCT%
+        #   [fixed-width label column on the left]  [elastic bar]  [right tail]
+        #
+        # Bars use max-normalization (leader = 100% wide) so the visual contrast
+        # between rows reflects *relative rank*, not absolute share. This keeps
+        # smaller entries legible even when one value dominates.
+        LABEL_W = 18
+
+        def _esc(s: str) -> str:
+            """Escape `[` so user-data can't inject Textual markup."""
+            return s.replace("[", r"\[")
+
+        def _panel_row(label: str, value_str: str, fraction: float,
+                       fill: str) -> Horizontal:
+            """One unified panel row: label+value column, elastic bar, pct tail."""
+            safe_label = _esc(label[:LABEL_W])
+            safe_value = _esc(value_str)
+            return Horizontal(
+                Label(
+                    f" [#FFCC99]{safe_label:<{LABEL_W}}[/] "
+                    f"[#FF9900]{safe_value:>7}[/] ",
+                    classes="panel-row-label", markup=True,
+                ),
+                Static("[#CC6699]◖[/]", classes="bar-cap", markup=True),
+                FluidBar(fraction, fill_color=fill, classes="fluid-bar"),
+                Static("[#CC6699]◗[/]", classes="bar-cap", markup=True),
+                classes="ops-labeled-bar",
+            )
+
+        def _build_panel(title: str, subtitle: str,
+                         rows: List[Widget]) -> Vertical:
+            panel = Vertical(*rows, classes="ops-panel ops-panel-third")
+            panel.border_title = f"◖ {title} ◗"
+            panel.border_subtitle = subtitle
+            return panel
+
         side_by_side_children: list[Widget] = []
 
+        # ── Projects panel ────────────────────────────────────────────
         if sorted_projects:
-            proj_rows: list[Widget] = []
-            for proj, cost in sorted_projects[:6]:
-                pct = (cost / today_cost * 100) if today_cost > 0 else 0
-                proj_rows.append(Label(
-                    f" [#FFCC99]{proj[:34]:<34}[/] "
-                    f"[#FFCC99]{format_cost(cost):>7}[/] [dim]{pct:>3.0f}%[/]",
-                    classes="ops-project-name", markup=True,
-                ))
-                proj_rows.append(Horizontal(
-                    Static(" [#CC6699]◖[/]", classes="bar-cap", markup=True),
-                    FluidBar(pct / 100.0, fill_color="#FF9900",
-                             classes="fluid-bar"),
-                    Static("[#CC6699]◗[/] ", classes="bar-cap", markup=True),
-                    classes="ops-project-bar",
-                ))
-            proj_panel = Vertical(*proj_rows, classes="ops-panel ops-panel-half")
-            proj_panel.border_title = "◖ ACTIVE PROJECTS ◗"
-            proj_panel.border_subtitle = f"{len(sorted_projects)} total"
-            side_by_side_children.append(proj_panel)
+            top_projects = sorted_projects[:6]
+            max_cost = max((c for _, c in top_projects), default=1) or 1
+            proj_rows = [
+                _panel_row(
+                    label=proj,
+                    value_str=format_cost(cost),
+                    fraction=cost / max_cost,
+                    fill="#FF9900",
+                )
+                for proj, cost in top_projects
+            ]
+            side_by_side_children.append(_build_panel(
+                "ACTIVE PROJECTS",
+                f"{len(sorted_projects)} total",
+                proj_rows,
+            ))
 
+        # ── Model mix panel ───────────────────────────────────────────
         model_counts = s["model_counts"]
+        if model_counts:
+            total_calls = sum(model_counts.values()) or 1
+            segments = sorted(model_counts.items(),
+                              key=lambda x: x[1], reverse=True)
+            max_count = segments[0][1]
+            model_rows = [
+                _panel_row(
+                    label=m,
+                    value_str=f"{c:,}",
+                    fraction=c / max_count,
+                    fill=model_color(m),
+                )
+                for m, c in segments
+            ]
+            side_by_side_children.append(_build_panel(
+                "MODEL MIX",
+                f"{total_calls:,} calls",
+                model_rows,
+            ))
+
+        # ── Stop reasons panel ────────────────────────────────────────
         stop_counts = s["stop_counts"]
-        if model_counts or stop_counts:
-            mix_rows: list[Widget] = []
-            if model_counts:
-                total_calls = sum(model_counts.values()) or 1
-                segments = sorted(model_counts.items(),
-                                  key=lambda x: x[1], reverse=True)
-                # Fluid stacked bar on top spanning full panel width
-                stacked_segs = [(m, c, model_color(m))
-                                for m, c in segments]
-                mix_rows.append(Horizontal(
-                    Static(" [#CC6699]◖[/]", classes="bar-cap", markup=True),
-                    StackedBar(stacked_segs, classes="fluid-bar"),
-                    Static("[#CC6699]◗[/] ", classes="bar-cap", markup=True),
-                    classes="ops-mix-bar",
+        if stop_counts:
+            total_stops = sum(stop_counts.values()) or 1
+            stop_color_map = {
+                "end_turn": "#9999CC",
+                "tool_use": "#FF9900",
+                "max_tokens": "#CC6699",
+                "stop_sequence": "#CC9966",
+                "—": "#555566",
+            }
+            ordered = sorted(stop_counts.items(),
+                             key=lambda x: x[1], reverse=True)
+            max_c = ordered[0][1]
+            stop_rows = [
+                _panel_row(
+                    label=sr,
+                    value_str=f"{c:,}",
+                    fraction=c / max_c,
+                    fill=stop_color_map.get(sr, "#CC9966"),
+                )
+                for sr, c in ordered
+            ]
+            side_by_side_children.append(_build_panel(
+                "STOP REASONS",
+                f"{total_stops:,} turns",
+                stop_rows,
+            ))
+
+        # ── Subagent types panel ──────────────────────────────────────
+        subagent_types = s["subagent_type_counts"]
+        if subagent_types:
+            total_spawns = sum(subagent_types.values()) or 1
+            top_types = subagent_types.most_common(6)
+            max_c = top_types[0][1]
+            type_rows: list[Widget] = [
+                _panel_row(
+                    label=(t.split(":")[-1] if ":" in t else t),
+                    value_str=f"{c:,}",
+                    fraction=c / max_c,
+                    fill="#CC99CC",
+                )
+                for t, c in top_types
+            ]
+            if len(subagent_types) > 6:
+                hidden = len(subagent_types) - 6
+                hidden_n = sum(c for _, c in subagent_types.most_common()[6:])
+                type_rows.append(Label(
+                    f" [dim]+ {hidden} more · {hidden_n:,} calls[/]",
+                    classes="panel-row-footer", markup=True,
                 ))
-                mix_rows.append(Label(
-                    f" [dim]{total_calls:,} calls total[/]",
-                    classes="ops-mix-legend", markup=True,
-                ))
-                # Per-model row: swatch + name + count + fluid bar + pct
-                for m, c in segments:
-                    color = model_color(m)
-                    pct = c / total_calls * 100
-                    mix_rows.append(Label(
-                        f" [{color}]██[/] [#FFCC99]{m:<12}[/] "
-                        f"[#FF9900]{c:>5,}[/] [dim]{pct:>4.1f}%[/]",
-                        classes="ops-mix-legend", markup=True,
-                    ))
-                    mix_rows.append(Horizontal(
-                        Static("    ", classes="bar-cap"),
-                        FluidBar(c / total_calls,
-                                 fill_color=color,
-                                 classes="fluid-bar"),
-                        Static("  ", classes="bar-cap"),
-                        classes="ops-mix-model-bar",
-                    ))
-            if stop_counts:
-                mix_rows.append(Label(" ", classes="ops-mix-legend"))
-                mix_rows.append(Label(
-                    " [#9999CC]STOP REASONS[/]",
-                    classes="ops-stat-cell-label", markup=True,
-                ))
-                total_stops = sum(stop_counts.values()) or 1
-                for sr, c in sorted(stop_counts.items(),
-                                    key=lambda x: x[1], reverse=True):
-                    pct = c / total_stops * 100
-                    mix_rows.append(Label(
-                        f" [#CC9966]{sr:<14}[/] [#FF9900]{c:>5,}[/] "
-                        f"[dim]{pct:>4.1f}%[/]",
-                        classes="ops-mix-legend", markup=True,
-                    ))
-            mix_panel = Vertical(*mix_rows, classes="ops-panel ops-panel-half")
-            mix_panel.border_title = "◖ MODEL MIX ◗"
-            side_by_side_children.append(mix_panel)
+            side_by_side_children.append(_build_panel(
+                "SUBAGENT TYPES",
+                f"{total_spawns:,} spawns · {len(subagent_types)} types",
+                type_rows,
+            ))
 
         if side_by_side_children:
             stats_children.append(Horizontal(
@@ -1033,13 +1069,12 @@ class CostTrackerApp(App):
             self._selected_row = row_count - 1 if row_count else -1
 
         visible = entries[:row_count]
-        # Anchor = end_turn boundary (final reply in a turn). Within a run of
-        # tool_use rows belonging to the same user prompt, only the end_turn
-        # row repeats the prompt text; earlier rows show "(continuation)".
-        # For sessions with no end_turn visible (still in-progress), the
-        # most-recent row per session is treated as a "head" anchor.
+        # Anchor logic: prefer promptId (true turn boundary). Within a run of
+        # entries sharing a promptId, only the newest is shown as anchor.
+        # Fallback: for entries missing promptId (pre-rescan data), use the
+        # old end_turn + session-head heuristic.
+        seen_prompt_ids: set = set()
         seen_sessions_with_anchor: set = set()
-        # First pass: identify sessions that have an end_turn in view
         sessions_with_end_turn = set()
         for _, _, e in visible:
             if (e.get("stopReason") or "") == "end_turn":
@@ -1047,22 +1082,33 @@ class CostTrackerApp(App):
                 if sess:
                     sessions_with_end_turn.add(sess)
 
+        # Subagent-cost attribution: which sessions were spawned from today's
+        # entries (maps parent_session → total subagent cost).
+        sub_rollup = subagent_cost_rollup(entries)
+
         for idx, (dt, entry_id, e) in enumerate(visible):
+            if e.get("source") == "agent_spawn":
+                continue  # rendered implicitly via rollup, skip direct row
+            prompt_id = e.get("promptId") or ""
             session = e.get("session") or ""
             stop = e.get("stopReason") or ""
-            is_turn_end = stop == "end_turn"
-            # Head-anchor: first (newest) row of a session that has NO end_turn in view
-            is_session_head = (
-                session
-                and session not in sessions_with_end_turn
-                and session not in seen_sessions_with_anchor
-            )
-            if is_turn_end or is_session_head:
-                if session:
-                    seen_sessions_with_anchor.add(session)
-                is_anchor = True
+
+            if prompt_id:
+                # True anchor: first time we see this promptId (newest-first scan)
+                is_anchor = prompt_id not in seen_prompt_ids
+                if is_anchor:
+                    seen_prompt_ids.add(prompt_id)
+                is_turn_end = stop == "end_turn"
             else:
-                is_anchor = False
+                is_turn_end = stop == "end_turn"
+                is_session_head = (
+                    session
+                    and session not in sessions_with_end_turn
+                    and session not in seen_sessions_with_anchor
+                )
+                is_anchor = is_turn_end or is_session_head
+                if is_anchor and session:
+                    seen_sessions_with_anchor.add(session)
 
             short_m = short_model(e.get("model"))
             color = model_color(short_m)
@@ -1072,14 +1118,24 @@ class CostTrackerApp(App):
             cw = e.get(FIELD_CACHE_WRITES, 0)
             cache_str = f"{format_number(cr)}/{format_number(cw)}"
             cost_val = e.get(FIELD_COST, 0)
-            cost = format_cost(cost_val)
-            bar = cost_bar(cost_val, max_log_cost)
+            # Attribute subagent spend to parent turn anchor (C rollup)
+            spawn_cost = 0.0
+            if is_anchor and session and session in sub_rollup:
+                spawn_cost = sub_rollup[session]
+            display_cost = cost_val + spawn_cost
+            cost = format_cost(display_cost)
+            bar = cost_bar(display_cost, max_log_cost)
             proj = short_project(e.get("project", ""))[:14]
             is_subagent = bool(e.get("isSubagent"))
             kind_marker = "[#9999CC]↳[/]" if is_subagent else " "
             time_str = dt.strftime("%H:%M:%S")
             tools_str = short_tools(e.get("tools") or [])[:8]
-            preview = row_preview_text(e) if is_anchor else "[dim]  ⋮[/]"
+            if is_anchor:
+                preview = row_preview_text(e)
+                if spawn_cost > 0:
+                    preview += f" [dim #9999CC](+{format_cost(spawn_cost)} subagents)[/]"
+            else:
+                preview = "[dim]  ⋮[/]"
             is_new = entry_id in self._new_entry_ids
             is_selected = idx == self._selected_row
             if is_selected:

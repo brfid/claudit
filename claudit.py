@@ -572,10 +572,23 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
     was parsed in a prior pass.
 
     Returns (entries, final_byte_offset, final_user_text).
+
+    In addition to billable assistant entries, this also emits synthetic
+    entries with ``source="agent_spawn"`` whenever the assistant invokes the
+    Agent tool. Those carry ``subagentType``, ``description``, ``promptId``,
+    and ``parentSession`` so the OPS dashboard can surface subagent analytics
+    without re-parsing JSONL at render time.
     """
     final_messages = {}
+    spawns: Dict[str, Dict] = {}
     last_good_offset = seek_offset
     last_user_text = initial_user_text
+    last_prompt_id = ""
+    # The parent session UUID is this file's own stem for top-level files.
+    # For subagent (sidechain) files, JSONL records carry `sessionId` pointing
+    # to the parent. We capture the first occurrence and reuse it for spawn
+    # attribution.
+    parent_session_id = ""
 
     try:
         with open(session_file, 'r') as f:
@@ -594,6 +607,12 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
                 last_good_offset = line_end
 
                 obj_type = obj.get('type')
+                if not parent_session_id:
+                    parent_session_id = obj.get('sessionId') or ""
+                pid = obj.get('promptId')
+                if pid:
+                    last_prompt_id = pid
+
                 if obj_type == 'user':
                     text = _extract_user_text(obj)
                     if text and not text.startswith('<'):
@@ -612,15 +631,32 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
                 if not msg_id:
                     continue
 
-                # Extract tool names from assistant content blocks
+                # Walk content blocks once: capture tool names + detect Agent spawns
                 tools = []
                 content = msg.get('content')
                 if isinstance(content, list):
                     for block in content:
-                        if isinstance(block, dict) and block.get('type') == 'tool_use':
-                            name = block.get('name')
-                            if name:
-                                tools.append(name)
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get('type') != 'tool_use':
+                            continue
+                        name = block.get('name')
+                        if name:
+                            tools.append(name)
+                        # Capture Agent invocations as synthetic ledger entries
+                        if name == 'Agent':
+                            inp = block.get('input') or {}
+                            spawn_id = block.get('id') or ""
+                            if spawn_id:
+                                spawns[f"spawn:{spawn_id}"] = {
+                                    'spawn_id': spawn_id,
+                                    'timestamp': obj.get('timestamp'),
+                                    'parent_session': parent_session_id,
+                                    'prompt_id': last_prompt_id,
+                                    'subagent_type': inp.get('subagent_type') or '(none)',
+                                    'description': (inp.get('description') or '')[:80],
+                                    'invoking_msg_id': msg_id,
+                                }
 
                 stop_reason = msg.get('stop_reason')
                 if stop_reason is not None:
@@ -631,6 +667,8 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
                         'stop_reason': stop_reason,
                         'prompt_preview': last_user_text[:80],
                         'tools': tools,
+                        'prompt_id': last_prompt_id,
+                        'parent_session': parent_session_id,
                     }
 
     except (IOError, OSError) as e:
@@ -663,6 +701,8 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
                 'model': model,
                 'project': _project_from_session_path(session_file),
                 'session': session_file.stem,
+                'parentSession': data.get('parent_session') or '',
+                'promptId': data.get('prompt_id') or '',
                 'isSubagent': is_subagent,
                 'stopReason': data.get('stop_reason'),
                 'promptPreview': data.get('prompt_preview', ''),
@@ -676,6 +716,30 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
             }
         except (ValueError, KeyError, TypeError):
             continue
+
+    # Emit synthetic agent-spawn entries
+    project = _project_from_session_path(session_file)
+    for eid, data in spawns.items():
+        try:
+            ts_str = data['timestamp']
+            dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00')).replace(tzinfo=None)
+        except (ValueError, KeyError, TypeError):
+            continue
+        entries[eid] = {
+            'source': 'agent_spawn',
+            'ts': dt.isoformat(),
+            'project': project,
+            'session': session_file.stem,
+            'parentSession': data.get('parent_session') or '',
+            'promptId': data.get('prompt_id') or '',
+            'subagentType': data.get('subagent_type') or '(none)',
+            'description': data.get('description') or '',
+            'invokingMsgId': data.get('invoking_msg_id') or '',
+            # Non-billable — zero all cost/token fields so aggregations pass through
+            FIELD_TOKENS_IN: 0, FIELD_TOKENS_OUT: 0,
+            FIELD_CACHE_WRITES: 0, FIELD_CACHE_READS: 0,
+            FIELD_COST: 0.0, FIELD_CACHE_SAVINGS: 0.0,
+        }
 
     return entries, last_good_offset, last_user_text
 
@@ -760,7 +824,8 @@ def entry_local_dt(entry: Dict) -> datetime:
     CC entries are stored as UTC-naive; Cline entries are already local.
     """
     dt = datetime.fromisoformat(entry['ts'])
-    if entry.get('source') == 'cc':
+    # Both CC and CC-derived agent_spawn entries are stored UTC-naive
+    if entry.get('source') in ('cc', 'agent_spawn'):
         dt = dt.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
     return dt
 

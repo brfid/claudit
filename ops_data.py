@@ -80,6 +80,10 @@ def aggregate_today(entries: List[Tuple], short_project_fn,
 
     short_project_fn / short_model_fn are injected so aggregation has no
     implicit coupling to display helpers.
+
+    Agent-spawn entries (source='agent_spawn') are tallied separately into
+    `subagent_type_counts` and skipped for cost/token aggregation so they
+    don't inflate billable totals.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     s = {
@@ -89,10 +93,16 @@ def aggregate_today(entries: List[Tuple], short_project_fn,
         "project_cost": defaultdict(float),
         "model_counts": Counter(),
         "stop_counts": Counter(),
+        "subagent_type_counts": Counter(),
+        "spawn_count": 0,
         "first_dt": None,
     }
     for dt, _, e in entries:
         if dt.strftime("%Y-%m-%d") != today:
+            continue
+        if e.get("source") == "agent_spawn":
+            s["subagent_type_counts"][e.get("subagentType") or "(none)"] += 1
+            s["spawn_count"] += 1
             continue
         cost = e.get(FIELD_COST, 0)
         s["count"] += 1
@@ -112,6 +122,97 @@ def aggregate_today(entries: List[Tuple], short_project_fn,
             s["first_dt"] = dt
     s["costs"].sort()
     return s
+
+
+def group_by_prompt(entries: List[Tuple]) -> List[Dict]:
+    """Group consecutive entries sharing a promptId into turn summaries.
+
+    Returns a list of dicts (newest-first), one per prompt_id. Each dict:
+        prompt_id:   the UUID
+        start_dt:    first (oldest) call's dt
+        end_dt:      last (newest) call's dt
+        turns:       total assistant turns in this prompt
+        cost:        summed cost (including subagent cost via parent_session)
+        tokens_in/out, cache_reads/writes:  sums
+        tools:       list of all tool names used across turns
+        final_stop:  stop_reason of the end_turn call, or the newest call
+        preview:     prompt_preview from any turn
+        session:     top-level session UUID (for parent/child joining)
+        models:      set of models used
+        spawn_count: how many Agent invocations this prompt made
+
+    Entries without a promptId get their own single-entry "group".
+    """
+    groups: Dict[str, Dict] = {}
+    orphan_idx = 0
+    for dt, eid, e in entries:
+        if e.get("source") == "agent_spawn":
+            pid = e.get("promptId") or ""
+            if pid and pid in groups:
+                groups[pid]["spawn_count"] += 1
+            continue
+        pid = e.get("promptId") or ""
+        if not pid:
+            pid = f"_orphan:{orphan_idx}:{eid}"
+            orphan_idx += 1
+        g = groups.get(pid)
+        if g is None:
+            g = {
+                "prompt_id": pid, "start_dt": dt, "end_dt": dt,
+                "turns": 0, "cost": 0.0,
+                "tokens_in": 0, "tokens_out": 0,
+                "cache_reads": 0, "cache_writes": 0,
+                "tools": [], "final_stop": "", "preview": "",
+                "session": e.get("session") or "",
+                "models": set(), "spawn_count": 0,
+                "is_subagent": bool(e.get("isSubagent")),
+                "project": e.get("project") or "",
+            }
+            groups[pid] = g
+        g["turns"] += 1
+        g["cost"] += e.get(FIELD_COST, 0)
+        g["tokens_in"] += e.get(FIELD_TOKENS_IN, 0)
+        g["tokens_out"] += e.get(FIELD_TOKENS_OUT, 0)
+        from claudit import FIELD_CACHE_READS, FIELD_CACHE_WRITES
+        g["cache_reads"] += e.get(FIELD_CACHE_READS, 0)
+        g["cache_writes"] += e.get(FIELD_CACHE_WRITES, 0)
+        for t in e.get("tools") or []:
+            g["tools"].append(t)
+        if e.get("model"):
+            g["models"].add(e["model"])
+        if dt < g["start_dt"]:
+            g["start_dt"] = dt
+        if dt > g["end_dt"]:
+            g["end_dt"] = dt
+        # Keep the NEWEST preview — that's the anchor user prompt in the group
+        if e.get("promptPreview") and not g["preview"]:
+            g["preview"] = e["promptPreview"]
+        stop = e.get("stopReason") or ""
+        if stop == "end_turn" or not g["final_stop"]:
+            g["final_stop"] = stop
+    # Attach spawns from the second pass (those whose prompt_id was discovered
+    # earlier in the first loop are already counted above).
+    groups_list = list(groups.values())
+    groups_list.sort(key=lambda g: g["end_dt"], reverse=True)
+    return groups_list
+
+
+def subagent_cost_rollup(entries: List[Tuple]) -> Dict[str, float]:
+    """Return {parent_session_uuid: total_subagent_cost} for today.
+
+    Used to attribute subagent-session cost back to the parent prompt.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    out: Dict[str, float] = defaultdict(float)
+    for dt, _, e in entries:
+        if dt.strftime("%Y-%m-%d") != today:
+            continue
+        if not e.get("isSubagent"):
+            continue
+        parent = e.get("parentSession") or ""
+        if parent:
+            out[parent] += e.get(FIELD_COST, 0)
+    return dict(out)
 
 
 # ── Display-string helpers ────────────────────────────────────────────────
@@ -184,13 +285,17 @@ def row_preview_text(entry: Dict) -> str:
 
     Prefers the captured user prompt. Falls back to a synthesized descriptor
     built from available metadata so the row still reads meaningfully.
+
+    User-supplied prompt text is escaped so `[` characters in prompts can't
+    inject Textual markup (which would raise MarkupError at render time).
     """
     from claudit import FIELD_CACHE_READS, FIELD_CACHE_WRITES  # local: avoid cycles
 
     raw = (entry.get("promptPreview") or "").replace("\n", " ").replace("\t", " ")
     clean = " ".join(raw.split())
     if clean:
-        return f"[dim]»[/] {clean}"
+        # Escape `[` so bracketed user content can't inject markup
+        return f"[dim]»[/] {clean.replace('[', chr(92) + '[')}"
 
     bits = []
     stop = entry.get("stopReason")

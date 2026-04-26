@@ -68,22 +68,43 @@ class _FluidBarBase(Static):
 
 
 class FluidBar(_FluidBarBase):
-    """Proportional horizontal fill bar; `fraction` ∈ [0, 1]."""
+    """Proportional horizontal fill bar; `fraction` ∈ [0, 1].
+
+    If `label` is given and the filled portion has enough room (≥ len+2), the
+    label is drawn inside the fill in `label_color`. Otherwise the bar renders
+    plain and the caller can place a label next to it externally.
+    """
 
     def __init__(self, fraction: float, fill_color: str = "#FF9900",
-                 empty_color: str = "#3a3a4a", **kwargs):
+                 empty_color: str = "#3a3a4a", label: str = "",
+                 label_color: str = "#000000", **kwargs):
         super().__init__("", **kwargs)
         self._fraction = max(0.0, min(1.0, fraction))
         self._fill_color = fill_color
         self._empty_color = empty_color
+        self._label = label
+        self._label_color = label_color
 
     def _draw(self, width: int) -> str:
         if width <= 0:
             return ""
         fill = max(0, min(width, int(self._fraction * width)))
         empty = width - fill
+        fill_block = "█" * fill
+        if self._label and fill >= len(self._label) + 2:
+            # Center the label inside the fill
+            pad = (fill - len(self._label)) // 2
+            fill_block = (
+                "█" * pad
+                + self._label
+                + "█" * (fill - pad - len(self._label))
+            )
+            return (
+                f"[{self._label_color} on {self._fill_color}]{fill_block}[/]"
+                f"[{self._empty_color}]{'░' * empty}[/]"
+            )
         return (
-            f"[{self._fill_color}]{'█' * fill}[/]"
+            f"[{self._fill_color}]{fill_block}[/]"
             f"[{self._empty_color}]{'░' * empty}[/]"
         )
 
@@ -92,11 +113,15 @@ class StackedBar(_FluidBarBase):
     """Horizontal bar split into colored segments by proportion.
 
     segments: list of (label, value, color). Zero-value segments are skipped.
+    Each segment's label is drawn inside the segment when it fits (≥ len+2).
     """
 
-    def __init__(self, segments, **kwargs):
+    LABEL_COLOR = "#000000"
+
+    def __init__(self, segments, show_labels: bool = True, **kwargs):
         super().__init__("", **kwargs)
         self._segments = [(lbl, v, c) for lbl, v, c in segments if v > 0]
+        self._show_labels = show_labels
 
     def _draw(self, width: int) -> str:
         if width <= 0 or not self._segments:
@@ -112,10 +137,18 @@ class StackedBar(_FluidBarBase):
                 w = min(w, remaining - (len(self._segments) - i - 1))
                 widths.append(w)
                 remaining -= w
-        return "".join(
-            f"[{color} on {color}]{'█' * w}[/]"
-            for (_, _, color), w in zip(self._segments, widths)
-        )
+
+        out = []
+        for (label, _, color), w in zip(self._segments, widths):
+            if self._show_labels and label and w >= len(label) + 2:
+                pad = (w - len(label)) // 2
+                content = "█" * pad + label + "█" * (w - pad - len(label))
+                out.append(
+                    f"[{self.LABEL_COLOR} on {color}]{content}[/]"
+                )
+            else:
+                out.append(f"[{color} on {color}]{'█' * w}[/]")
+        return "".join(out)
 
 
 # ── Hourly activity bar ───────────────────────────────────────────────────
