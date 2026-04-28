@@ -15,7 +15,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Label, Sparkline, Static
 
-from claudit import (
+from .formatters import (
     FIELD_CACHE_READS,
     FIELD_CACHE_SAVINGS,
     FIELD_CACHE_WRITES,
@@ -41,14 +41,16 @@ class StatBox(Static):
         self._spark_label = spark_label
 
     def compose(self) -> ComposeResult:
-        yield Label(self._label, classes="stat-label")
-        yield Label(self._value, classes="stat-value")
-        if self._detail:
-            yield Label(self._detail, classes="stat-detail")
+        with Vertical(classes="stat-text"):
+            yield Label(self._label, classes="stat-label")
+            yield Label(self._value, classes="stat-value")
+            if self._detail:
+                yield Label(self._detail, classes="stat-detail")
         if self._spark_data and any(v > 0 for v in self._spark_data):
-            yield Sparkline(self._spark_data, summary_function=max)
-            if self._spark_label:
-                yield Label(self._spark_label, classes="spark-caption")
+            with Vertical(classes="stat-spark"):
+                yield Sparkline(self._spark_data, summary_function=max)
+                if self._spark_label:
+                    yield Label(self._spark_label, classes="spark-caption")
 
 
 # ── Fluid-width bars ──────────────────────────────────────────────────────
@@ -109,48 +111,6 @@ class FluidBar(_FluidBarBase):
         )
 
 
-class StackedBar(_FluidBarBase):
-    """Horizontal bar split into colored segments by proportion.
-
-    segments: list of (label, value, color). Zero-value segments are skipped.
-    Each segment's label is drawn inside the segment when it fits (≥ len+2).
-    """
-
-    LABEL_COLOR = "#000000"
-
-    def __init__(self, segments, show_labels: bool = True, **kwargs):
-        super().__init__("", **kwargs)
-        self._segments = [(lbl, v, c) for lbl, v, c in segments if v > 0]
-        self._show_labels = show_labels
-
-    def _draw(self, width: int) -> str:
-        if width <= 0 or not self._segments:
-            return ""
-        total = sum(v for _, v, _ in self._segments) or 1
-        widths = []
-        remaining = width
-        for i, (_, v, _) in enumerate(self._segments):
-            if i == len(self._segments) - 1:
-                widths.append(remaining)
-            else:
-                w = max(1, int(v / total * width))
-                w = min(w, remaining - (len(self._segments) - i - 1))
-                widths.append(w)
-                remaining -= w
-
-        out = []
-        for (label, _, color), w in zip(self._segments, widths):
-            if self._show_labels and label and w >= len(label) + 2:
-                pad = (w - len(label)) // 2
-                content = "█" * pad + label + "█" * (w - pad - len(label))
-                out.append(
-                    f"[{self.LABEL_COLOR} on {color}]{content}[/]"
-                )
-            else:
-                out.append(f"[{color} on {color}]{'█' * w}[/]")
-        return "".join(out)
-
-
 # ── Hourly activity bar ───────────────────────────────────────────────────
 
 class HourlyBar(Horizontal):
@@ -201,6 +161,48 @@ class LogRow(Label):
 
     def on_click(self, event: Click) -> None:
         self.post_message(self.Clicked(self.row_index))
+
+
+# ── Help modal ────────────────────────────────────────────────────────────
+
+class HelpScreen(ModalScreen):
+    """Keyboard shortcut reference overlay."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("q", "dismiss", "Close"),
+        Binding("?", "dismiss", "Close"),
+    ]
+
+    _HELP_TEXT = """\
+[b]Navigation[/b]
+  [b]]  [/b] Next tab
+  [b][  [/b] Prev tab
+  [b]1–0[/b] Jump to tab directly
+
+[b]Scrolling[/b]
+  [b]j / k    [/b] Down / up one row
+  [b]J / K    [/b] Down / up 10 rows
+  [b]ctrl+d/u [/b] Page down / page up
+  [b]g / G    [/b] Jump to top / bottom
+
+[b]OPS log[/b]
+  [b]enter    [/b] Open entry detail
+  [b]esc / q  [/b] Close detail
+
+[b]General[/b]
+  [b]r        [/b] Pause / resume auto-refresh
+  [b]?        [/b] This help
+  [b]q        [/b] Quit
+
+[dim]esc / q / ? to close[/dim]\
+"""
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(self._HELP_TEXT, id="help-body"),
+            id="help-box",
+        )
 
 
 # ── Detail modal ──────────────────────────────────────────────────────────

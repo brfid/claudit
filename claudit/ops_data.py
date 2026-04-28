@@ -9,12 +9,14 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from claudit import (
+from .aggregation import entry_local_dt
+from .formatters import (
+    FIELD_CACHE_READS,
     FIELD_CACHE_SAVINGS,
+    FIELD_CACHE_WRITES,
     FIELD_COST,
     FIELD_TOKENS_IN,
     FIELD_TOKENS_OUT,
-    entry_local_dt,
 )
 
 # Ordered (prefix, short) mapping for model-name shortening
@@ -173,7 +175,6 @@ def group_by_prompt(entries: List[Tuple]) -> List[Dict]:
         g["cost"] += e.get(FIELD_COST, 0)
         g["tokens_in"] += e.get(FIELD_TOKENS_IN, 0)
         g["tokens_out"] += e.get(FIELD_TOKENS_OUT, 0)
-        from claudit import FIELD_CACHE_READS, FIELD_CACHE_WRITES
         g["cache_reads"] += e.get(FIELD_CACHE_READS, 0)
         g["cache_writes"] += e.get(FIELD_CACHE_WRITES, 0)
         for t in e.get("tools") or []:
@@ -289,8 +290,6 @@ def row_preview_text(entry: Dict) -> str:
     User-supplied prompt text is escaped so `[` characters in prompts can't
     inject Textual markup (which would raise MarkupError at render time).
     """
-    from claudit import FIELD_CACHE_READS, FIELD_CACHE_WRITES  # local: avoid cycles
-
     raw = (entry.get("promptPreview") or "").replace("\n", " ").replace("\t", " ")
     clean = " ".join(raw.split())
     if clean:

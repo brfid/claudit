@@ -7,24 +7,27 @@ from pathlib import Path
 
 import pytest
 
-from claudit import (
-    HAIKU_PRICING,
-    OPUS_PRICING,
-    SONNET_PRICING,
+from claudit.aggregation import aggregate_by_day, compute_date_window
+from claudit.collectors import (
     _extract_user_text,
-    _infer_pricing_by_family,
     _project_from_session_path,
-    aggregate_by_day,
-    compute_date_window,
+    parse_claude_code_session,
+)
+from claudit.ledger import (
     file_needs_processing,
-    get_model_pricing,
     ingest,
     load_ingest_state,
     load_ledger,
-    parse_claude_code_session,
     save_ingest_state,
     save_ledger,
     update_file_state,
+)
+from claudit.pricing import (
+    HAIKU_PRICING,
+    OPUS_PRICING,
+    SONNET_PRICING,
+    _infer_pricing_by_family,
+    get_model_pricing,
 )
 
 
@@ -175,13 +178,13 @@ class TestIngestState:
     def test_missing_file(self, tmp_dir):
         path = tmp_dir / "nope.json"
         state = load_ingest_state(path)
-        assert state == {"_version": 1, "files": {}}
+        assert state == {"_version": 1, "files": {}, "last_ingest_at": None}
 
     def test_corrupt_file(self, tmp_dir):
         path = tmp_dir / "bad.json"
         path.write_text("not json at all")
         state = load_ingest_state(path)
-        assert state == {"_version": 1, "files": {}}
+        assert state == {"_version": 1, "files": {}, "last_ingest_at": None}
 
 
 # ---------------------------------------------------------------------------
@@ -484,8 +487,8 @@ class TestProjectFromSessionPath:
         session_file = slug_dir / "abc.jsonl"
         session_file.write_text("")
 
-        monkeypatch.setattr("claudit.get_claude_code_dir", lambda: fake_cc)
-        monkeypatch.setattr("claudit.Path.home", lambda: fake_home)
+        monkeypatch.setattr("claudit.collectors.get_claude_code_dir", lambda: fake_cc)
+        monkeypatch.setattr("claudit.collectors.Path.home", lambda: fake_home)
 
         result = _project_from_session_path(session_file)
         # Should resolve to the real target

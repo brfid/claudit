@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
 """LCARS-themed TUI dashboard for claudit."""
 
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -15,8 +13,8 @@ from textual.widgets import Button, Label, Static
 
 from textual_plotext import PlotextPlot
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from claudit import (
+from .aggregation import aggregate_by_day, entry_local_dt
+from .formatters import (
     FIELD_CACHE_READS,
     FIELD_CACHE_SAVINGS,
     FIELD_CACHE_WRITES,
@@ -25,18 +23,15 @@ from claudit import (
     FIELD_TOKENS_IN,
     FIELD_TOKENS_OUT,
     SOURCE_MAP,
-    aggregate_by_day,
     calculate_totals,
-    entry_local_dt,
     format_cost,
     format_number,
     format_tokens,
-    get_ledger_path,
     init_field_dict,
-    load_ledger,
-    run_ingest,
 )
-from ops_data import (
+from .ledger import get_ledger_path, load_ledger
+from .pipeline import run_ingest
+from .ops_data import (
     aggregate_today,
     collect_entries,
     cost_bar,
@@ -49,9 +44,10 @@ from ops_data import (
     short_tools,
     subagent_cost_rollup,
 )
-from ops_widgets import (
+from .ops_widgets import (
     EntryDetailScreen,
     FluidBar,
+    HelpScreen,
     HourlyBar,
     LogRow,
     StatBox,
@@ -89,6 +85,35 @@ def aggregate_hourly_cost_heatmap(ledger: Dict, source_filter: Optional[str] = N
 
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
+# Background color for zero cells — dim gray so empty days are visible on dark bg
+_HEATMAP_ZERO = (30, 30, 30)
+
+
+def _grid_to_rgb(grid: List[List[float]],
+                 color_zero: tuple = _HEATMAP_ZERO,
+                 color_low: tuple = (0, 80, 0),
+                 color_high: tuple = (0, 255, 100)) -> List[List[tuple]]:
+    """Convert a float grid to RGB tuples for matrix_plot.
+
+    Zero cells get color_zero; non-zero cells are interpolated between
+    color_low and color_high based on their fraction of the grid max.
+    """
+    max_val = max((v for row in grid for v in row), default=0.0)
+    rgb_grid = []
+    for row in grid:
+        rgb_row = []
+        for v in row:
+            if v == 0.0 or max_val == 0.0:
+                rgb_row.append(color_zero)
+            else:
+                t = v / max_val
+                r = int(color_low[0] + t * (color_high[0] - color_low[0]))
+                g = int(color_low[1] + t * (color_high[1] - color_low[1]))
+                b = int(color_low[2] + t * (color_high[2] - color_low[2]))
+                rgb_row.append((r, g, b))
+        rgb_grid.append(rgb_row)
+    return rgb_grid
+
 
 # ── Main app ──
 
@@ -100,11 +125,21 @@ class CostTrackerApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "toggle_refresh", "Toggle refresh"),
+        Binding("?", "show_help", "Help"),
+        # Tab navigation
+        Binding("]", "tab_next", "Next tab", show=False),
+        Binding("[", "tab_prev", "Prev tab", show=False),
+        # Row navigation (OPS) / scroll (other tabs)
         Binding("j", "scroll_log(1)", "Scroll ↓", show=False),
         Binding("k", "scroll_log(-1)", "Scroll ↑", show=False),
         Binding("J", "scroll_log(10)", "Page ↓", show=False),
         Binding("K", "scroll_log(-10)", "Page ↑", show=False),
+        Binding("ctrl+d", "scroll_log(10)", "Page ↓", show=False),
+        Binding("ctrl+u", "scroll_log(-10)", "Page ↑", show=False),
+        Binding("g", "jump_top", "Top", show=False),
+        Binding("G", "jump_bottom", "Bottom", show=False),
         Binding("enter", "expand_selected", "Expand row", show=False),
+        # Number shortcuts
         Binding("1", "tab('OVERVIEW')", "Overview", show=False),
         Binding("2", "tab('DAILY')", "Daily", show=False),
         Binding("3", "tab('CUMULATIVE')", "Cumulative", show=False),
@@ -143,7 +178,8 @@ class CostTrackerApp(App):
         self._ledger = load_ledger(ledger_path)
 
         run_ingest(ledger_path, self._ledger, source=self._source_filter_arg,
-                   no_ingest=self._no_ingest, force_ingest=self._force_ingest)
+                   no_ingest=self._no_ingest, force_ingest=self._force_ingest,
+                   quiet=True)
 
         arg = self._source_filter_arg
         self._source_filter = None if arg == "all" else SOURCE_MAP.get(arg, arg)
@@ -201,8 +237,8 @@ class CostTrackerApp(App):
         new_count = len(self._new_entry_ids)
         new_badge = f" · [#FF9900]+{new_count} new[/]" if new_count else ""
         dot = " [#9999CC]◤[/] "
-        hint = (f"{dot}j/k select{dot}ENTER details{dot}click row"
-                f"{dot}r pause{dot}q quit")
+        hint = (f"{dot}\\[/] tabs{dot}j/k · g/G{dot}ENTER details"
+                f"{dot}r pause{dot}? help{dot}q quit")
         status = self.query_one("#bottom-status", Static)
         status.update(
             f"  [#FF9900]{entry_count:,}[/] entries{dot}"
@@ -221,6 +257,39 @@ class CostTrackerApp(App):
     def action_toggle_refresh(self) -> None:
         self._auto_refresh = not self._auto_refresh
         self._update_status_bar()
+
+    def action_tab_next(self) -> None:
+        idx = (TABS.index(self._current_tab) + 1) % len(TABS)
+        self.action_tab(TABS[idx])
+
+    def action_tab_prev(self) -> None:
+        idx = (TABS.index(self._current_tab) - 1) % len(TABS)
+        self.action_tab(TABS[idx])
+
+    def action_jump_top(self) -> None:
+        if self._current_tab == "OPS" and self._ops_entries_cache:
+            self._selected_row = 0
+            self._render_tab("OPS")
+            self._scroll_selected_into_view()
+        else:
+            try:
+                self.query_one("#main-content", VerticalScroll).scroll_home(animate=False)
+            except Exception:
+                pass
+
+    def action_jump_bottom(self) -> None:
+        if self._current_tab == "OPS" and self._ops_entries_cache:
+            self._selected_row = min(100, len(self._ops_entries_cache)) - 1
+            self._render_tab("OPS")
+            self._scroll_selected_into_view()
+        else:
+            try:
+                self.query_one("#main-content", VerticalScroll).scroll_end(animate=False)
+            except Exception:
+                pass
+
+    def action_show_help(self) -> None:
+        self.push_screen(HelpScreen())
 
     def action_scroll_log(self, delta: int) -> None:
         """On OPS: move selection. Off OPS: scroll container."""
@@ -558,7 +627,7 @@ class CostTrackerApp(App):
 
     def _build_activity(self) -> Widget:
         reqs_by_date = {d: self._daily[d][FIELD_REQUESTS] for d in self._daily}
-        grid, month_ticks, month_labels, grid_start, grid_end = self._build_365_grid(
+        grid, month_ticks, month_labels, grid_start, grid_end = self._build_weeks_grid(
             {d: float(v) for d, v in reqs_by_date.items()}
         )
 
@@ -571,7 +640,7 @@ class CostTrackerApp(App):
 
         def on_mount_chart(event=None):
             plt = self._init_plt(plot)
-            plt.matrix_plot(list(reversed(grid)))
+            plt.matrix_plot(_grid_to_rgb(list(reversed(grid))))
             plt.yticks(list(range(7)), list(reversed(DAY_NAMES)))
             if month_ticks:
                 plt.xticks(month_ticks, month_labels)
@@ -585,18 +654,19 @@ class CostTrackerApp(App):
             f"Peak: {peak_day[5:] if peak_day else '—'} ({peak_count:,})"
         )
         return self._chart_panel(
-            "ACTIVITY HEATMAP — REQUESTS (365 days)", plot, subtitle,
+            "ACTIVITY HEATMAP — REQUESTS (13 weeks)", plot, subtitle,
         )
 
     # ── Calendar heatmap (GitHub-style) ──
 
+    CALENDAR_WEEKS = 13
+
     @staticmethod
-    def _build_365_grid(daily_values: Dict[str, float]):
-        """Build a 7-row × 53-col grid for the last 365 days, anchored to today."""
+    def _build_weeks_grid(daily_values: Dict[str, float], num_weeks: int = CALENDAR_WEEKS):
+        """Build a 7-row × N-col grid ending on the week of today."""
         today = datetime.now()
         grid_end = today + timedelta(days=(6 - today.weekday()))
-        grid_start = grid_end - timedelta(days=52 * 7 + 6)
-        num_weeks = 53
+        grid_start = grid_end - timedelta(days=(num_weeks - 1) * 7 + 6)
 
         grid = [[0.0] * num_weeks for _ in range(7)]
         for w in range(num_weeks):
@@ -618,7 +688,7 @@ class CostTrackerApp(App):
 
     def _build_calendar_heatmap(self) -> Widget:
         cost_by_date = {d: self._daily[d][FIELD_COST] for d in self._daily}
-        grid, month_ticks, month_labels, grid_start, grid_end = self._build_365_grid(cost_by_date)
+        grid, month_ticks, month_labels, grid_start, grid_end = self._build_weeks_grid(cost_by_date)
 
         active_days = sum(1 for v in cost_by_date.values() if v > 0)
         total_cost = sum(cost_by_date.values())
@@ -628,7 +698,7 @@ class CostTrackerApp(App):
 
         def on_mount_chart(event=None):
             plt = self._init_plt(plot)
-            plt.matrix_plot(list(reversed(grid)))
+            plt.matrix_plot(_grid_to_rgb(list(reversed(grid))))
             plt.yticks(list(range(7)),
                        list(reversed(DAY_NAMES)))
             if month_ticks:
@@ -645,7 +715,7 @@ class CostTrackerApp(App):
             f"Peak: {format_cost(max_cost)}"
         )
         return self._chart_panel(
-            "CALENDAR HEATMAP — DAILY COST (365 days)", plot, subtitle,
+            "CALENDAR HEATMAP — DAILY COST (13 weeks)", plot, subtitle,
         )
 
     # ── Spend heatmap (cost by hour × day-of-week) ──
@@ -667,7 +737,11 @@ class CostTrackerApp(App):
 
         def on_mount_chart(event=None):
             plt = self._init_plt(plot)
-            plt.matrix_plot(list(reversed(grid)))
+            plt.matrix_plot(_grid_to_rgb(
+                list(reversed(grid)),
+                color_low=(80, 30, 0),
+                color_high=(255, 140, 0),
+            ))
             plt.yticks(list(range(7)), list(reversed(DAY_NAMES)))
             plt.xticks(
                 [i for i in range(24) if i % 3 == 0],

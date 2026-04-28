@@ -1,11 +1,11 @@
 # claudit
 
-Tracks Claude API spend across Claude Code and Cline.
+Tracks Claude API spend across Claude Code and Cline. Reads session files written by each tool, deduplicates against a local ledger, and reports cost and token breakdowns.
 
 ## Prerequisites
 
 - Python 3.9+
-- At least one supported AI coding assistant:
+- At least one supported source:
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (CLI)
   - [Cline](https://github.com/cline/cline) (VS Code extension)
 
@@ -16,22 +16,22 @@ For the interactive dashboard:
 
 ## Install
 
-No package installation required. Clone the repo and run directly:
-
 ```bash
-python3 claudit.py
+git clone https://github.com/brfid/claudit.git
+cd claudit
+pip install -e .
 ```
 
-To install dashboard dependencies:
+After cloning, install the pre-commit hook to block accidental commits of runtime data:
 
 ```bash
-pip install textual textual-plotext
+./scripts/install-hooks.sh
 ```
 
-Optional: add a shell alias for quick access:
+To include dashboard dependencies:
 
 ```bash
-alias claudit="python3 /path/to/claudit.py"
+pip install -e '.[tui]'
 ```
 
 ## Get started
@@ -39,13 +39,13 @@ alias claudit="python3 /path/to/claudit.py"
 Run with no arguments to see the last 30 active days across all sources:
 
 ```bash
-python3 claudit.py
+claudit
 ```
 
 Launch the interactive dashboard:
 
 ```bash
-python3 claudit.py --tui
+claudit --tui
 ```
 
 ## Usage
@@ -53,18 +53,18 @@ python3 claudit.py --tui
 ### Filter by time range
 
 ```bash
-python3 claudit.py --days 7                        # Last 7 active days
-python3 claudit.py --all                           # All days with activity
-python3 claudit.py --from 2026-04-01 --to 2026-04-30  # Specific range
+claudit --days 7                               # Last 7 active days
+claudit --all                                  # All days with activity
+claudit --from 2026-04-01 --to 2026-04-30     # Specific range
 ```
 
-`--from` / `--to` are inclusive ISO dates. When either is set, it overrides the `--days` window.
+`--from` / `--to` are inclusive ISO dates. When either is set, it overrides `--days`.
 
 ### Filter by source
 
 ```bash
-python3 claudit.py --source cline         # Cline only
-python3 claudit.py --source claude-code   # Claude Code only
+claudit --source cline         # Cline only
+claudit --source claude-code   # Claude Code only
 ```
 
 ### Filter by project
@@ -72,28 +72,39 @@ python3 claudit.py --source claude-code   # Claude Code only
 Case-insensitive substring match against the project path stored per entry:
 
 ```bash
-python3 claudit.py --project techdocs-tools
-python3 claudit.py --project dotfiles --days 60
+claudit --project techdocs-tools
+claudit --project dotfiles --days 60
 ```
 
 ### Inspect the ledger
 
 ```bash
-python3 claudit.py --stats
+claudit --stats
 ```
 
-Prints file size, entry counts by source, date range, and top projects.
+Prints file size, entry counts by source, date range, top projects, last ingest time, and backup count.
 
 ### Control scanning behavior
 
-Each run scans live data from your AI assistants and merges it into a local ledger. You can control this:
+By default each run scans live data incrementally (unchanged files skipped, growing JSONL files resumed from the last byte offset). You can override:
 
 ```bash
-python3 claudit.py --cached    # Skip scanning, report from stored data only
-python3 claudit.py --rescan    # Ignore stored state, rescan everything
+claudit --cached            # Skip scanning, report from stored data only
+claudit --rescan            # Ignore stored state, rescan all files from byte 0
+claudit --deep              # Re-parse every session file; keeps ledger entries, deduplicates
+claudit --max-gap-hours 12  # Auto-promote to deep rescan if last ingest was >12h ago (default: 24)
 ```
 
-`--rescan` is useful after schema changes — missing fields on old entries (such as `model`, `project`, `promptPreview`, `isSubagent`, `session`) are back-filled without overwriting existing values.
+Use `--deep` when you suspect missed sessions. Use `--rescan` after recovering from a corrupt or missing ingest state.
+
+### Recalculate costs
+
+If Anthropic updates rates, recalculate stored costs against the current pricing table:
+
+```bash
+claudit --recalc --dry-run  # Preview changes without writing
+claudit --recalc            # Rewrite costs in the ledger
+```
 
 ### Other options
 
@@ -105,7 +116,7 @@ python3 claudit.py --rescan    # Ignore stored state, rescan everything
 
 ## Dashboard
 
-The `--tui` flag launches an interactive terminal dashboard. Visual theme inspired by [LCARS](https://en.wikipedia.org/wiki/LCARS).
+Launch with `claudit --tui`.
 
 ### Tabs
 
@@ -116,10 +127,10 @@ Number keys `1`–`0` switch tabs:
 | `1` | OVERVIEW | Six stat boxes with sparklines (today, this week, 30-day, tokens, cache, burn rate) |
 | `2` | DAILY | Daily cost line chart |
 | `3` | CUMULATIVE | Running total cost |
-| `4` | CALENDAR | 365-day cost heatmap (GitHub-style) |
+| `4` | CALENDAR | 13-week cost heatmap (GitHub-style) |
 | `5` | TOKENS | Input/output/cache bar chart |
 | `6` | CACHE | Savings vs efficiency |
-| `7` | REQUESTS | 365-day activity heatmap |
+| `7` | REQUESTS | 13-week activity heatmap |
 | `8` | COST MAP | Cost by hour × day-of-week |
 | `9` | CALLS | Per-call cost distribution histogram |
 | `0` | OPS | Live session stats, project breakdown, model mix, call log |
@@ -130,13 +141,13 @@ The OPS tab shows today's session activity:
 
 - **Session stats** — calls, cost, $/hr rate, cache efficiency, token totals
 - **Per-call distribution** — median, P95, max call cost
-- **Hourly heat strip** — 24-character braille sparkline of cost distribution by hour
+- **Hourly heat strip** — 24-character braille sparkline of cost by hour
 - **Active projects** — top 6 with cost bars
-- **Model mix** — colored per-family (opus=amber, sonnet=periwinkle, haiku=mauve)
+- **Model mix** — per-family color coding (Opus, Sonnet, Haiku)
 - **Stop reasons** — counts of `end_turn`, `tool_use`, `max_tokens`, etc.
 - **Call log** — 100 most recent calls with time, model, tokens, cache, cost bar, project, prompt preview
 
-New entries from auto-refresh are flagged with `★` and shown in bold peach. Subagent calls are marked with `↳`.
+New entries from auto-refresh are flagged with `★` and shown in bold. Subagent calls are marked with `↳`.
 
 ### Controls
 
@@ -144,8 +155,12 @@ New entries from auto-refresh are flagged with `★` and shown in bold peach. Su
 |---|---|
 | `q` | Quit |
 | `r` | Toggle auto-refresh (default: on, 30s) |
+| `?` | Show help |
 | `j` / `k` | Scroll down / up one line |
 | `J` / `K` | Scroll ten lines |
+| `ctrl+d` / `ctrl+u` | Page down / up |
+| `g` / `G` | Jump to top / bottom |
+| `]` / `[` | Next / previous tab |
 | `enter` | Expand most recent call (modal with full details) |
 | `1`–`0` | Switch tabs |
 
@@ -153,14 +168,18 @@ The status bar shows entry count, active days, refresh state, and a `+N new` bad
 
 ## How it works
 
-On each run, the tracker:
+On each run, claudit:
 
-1. Scans session data from Cline and/or Claude Code in parallel.
-2. Deduplicates entries against a local `ledger.json` using unique entry IDs.
-3. Back-fills missing fields on existing entries (schema evolution).
+1. Scans session data from Cline and Claude Code in parallel.
+2. Deduplicates entries against a local `ledger.json` by entry ID.
+3. Back-fills missing fields on existing entries (handles schema evolution).
 4. Reports cost and token breakdowns from the ledger.
 
-Scanning is incremental — unchanged files are skipped, and growing JSONL files resume from the last byte offset. State is stored in `ingest_state.json`.
+Scanning is incremental — unchanged files are skipped and growing JSONL files resume from the last byte offset. State is stored in `ingest_state.json`.
+
+If more than `--max-gap-hours` have elapsed since the last ingest (default: 24h), claudit auto-promotes to a deep rescan, re-parsing every session file from byte zero. Dedup by `msg_id` keeps the result consistent. This is the safety net against Claude Code's session cleanup window — as long as you run claudit at least once per that window, no data is lost.
+
+The ledger is backed up daily to `backups/ledger-YYYY-MM-DD.json` (7 copies retained). To roll back, copy a backup over `ledger.json`.
 
 ### Claude Code entry fields
 
@@ -171,42 +190,45 @@ Each ingested Claude Code call stores:
 - `session` — JSONL filename stem
 - `isSubagent` — `true` if the session file is under `*/subagents/*`
 - `stopReason` — `end_turn`, `tool_use`, `max_tokens`, etc.
-- `promptPreview` — first 80 chars of the preceding user text message (skips tool results)
+- `promptPreview` — first 80 chars of the preceding user message (tool results excluded)
 - Token/cost fields: `tokensIn`, `tokensOut`, `cacheWrites`, `cacheReads`, `cost`, `cacheSavings`
 
 ### Pricing
 
 Pricing is per model family, based on published Anthropic API rates (USD per million tokens):
 
-| Family | Input | Output | Cache write (5m) | Cache read |
+| Family | Input | Output | Cache write | Cache read |
 |---|---|---|---|---|
-| Opus | 15.00 | 75.00 | 18.75 | 1.50 |
+| Opus | 5.00 | 25.00 | 6.25 | 0.50 |
 | Sonnet | 3.00 | 15.00 | 3.75 | 0.30 |
 | Haiku | 1.00 | 5.00 | 1.25 | 0.10 |
 
-Exact model IDs are matched first (see `MODEL_PRICING` in `claudit.py`). Unknown IDs fall back to family inference (`claude-opus-*` → Opus pricing). Unrecognized names fall back to Sonnet pricing. Verify rates against [anthropic.com/pricing](https://www.anthropic.com/pricing) if you suspect drift. Existing ledger entries keep the cost computed at ingest time; to re-price retroactively you'd need to rescan and drop the ledger first.
+Exact model IDs are matched first (see `MODEL_PRICING` in `pricing.py`). Unknown IDs fall back to family inference (`claude-opus-*` → Opus pricing). Unrecognized names fall back to Sonnet pricing. Verify rates against [anthropic.com/pricing](https://www.anthropic.com/pricing) if you suspect drift. Use `--recalc` to update stored costs after a rate change.
 
 ### Data safety
 
-- **Survives cache removal** — once ingested, entries persist in the ledger.
-- **No double-counting** — re-scanning the same data is safe.
-- **Non-destructive** — the tracker never modifies source data.
+- **Survives session cleanup** — once ingested, entries persist in the ledger indefinitely.
+- **No double-counting** — re-scanning the same data is safe; dedup is by entry ID.
+- **Non-destructive** — claudit never modifies source data.
 
 ## Data files
+
+All files are stored in `~/.local/share/claudit/` by default.
 
 | File | Description |
 |---|---|
 | `ledger.json` | All ingested API call records, keyed by unique entry ID |
-| `ingest_state.json` | File processing cursors for incremental scanning (safe to delete) |
+| `ingest_state.json` | Per-file byte offsets for incremental scanning (safe to delete) |
+| `backups/ledger-YYYY-MM-DD.json` | Daily ledger snapshots, last 7 retained |
 
 ## Tests
 
 ```bash
 cd tools/claudit
-python3 -m pytest test_incremental.py -v
+pytest tests/ -v
 ```
 
-Covers: incremental ingest, file-state tracking, date/project/source filtering, model pricing fallback, prompt-preview extraction, schema-evolution back-fill, project-path resolution, subagent detection.
+Covers: incremental ingest, file-state tracking, date/project/source filtering, model pricing fallback, prompt-preview extraction, schema-evolution back-fill, project-path resolution, subagent detection, gap-triggered deep rescan, backup rotation, orphan ingest-state cleanup.
 
 ## Platform support
 

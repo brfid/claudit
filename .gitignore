@@ -1,4 +1,31 @@
-__pycache__/
-*.pyc
+# Runtime data — never commit. Contains personal API spend records.
 ledger.json
 ingest_state.json
+ledger.*.json
+ingest_state.*.json
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

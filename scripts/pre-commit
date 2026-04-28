@@ -1,0 +1,19 @@
+#!/bin/sh
+# Pre-commit hook: block commits that would leak runtime data files.
+# Installed by: ./scripts/install-hooks.sh
+
+forbidden_patterns='^ledger\.json$|^ingest_state\.json$|^ledger\..*\.json$|^ingest_state\..*\.json$'
+
+staged=$(git diff --cached --name-only)
+
+if printf '%s\n' "$staged" | grep -E "$forbidden_patterns" > /dev/null; then
+    echo "ERROR: commit includes protected runtime data files."
+    echo ""
+    printf '%s\n' "$staged" | grep -E "$forbidden_patterns"
+    echo ""
+    echo "These files contain personal API spend records and must never be committed."
+    echo "Unstage them: git reset HEAD <file>"
+    exit 1
+fi
+
+exit 0

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 
-from ops_data import (
+from claudit.ops_data import (
     TOOL_ABBREV,
     aggregate_today,
     collect_entries,

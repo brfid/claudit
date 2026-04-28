@@ -135,7 +135,14 @@ Screen {
     padding: 0 1;
     background: #0a0a0a;
     layout: vertical;
-    content-align: left top;
+    align: left middle;
+}
+
+.stat-box .stat-text {
+    width: 100%;
+    height: auto;
+    layout: vertical;
+    padding: 1 0 0 0;
 }
 
 .stat-box .stat-label {
@@ -164,19 +171,26 @@ Screen {
     padding: 0;
 }
 
+.stat-box .stat-spark {
+    width: 100%;
+    height: auto;
+    layout: vertical;
+    padding: 1 0 0 0;
+}
+
 .stat-box .spark-caption {
     width: 100%;
     height: 1;
     color: #666699;
     text-style: italic;
-    text-align: left;
+    text-align: right;
     padding: 0;
 }
 
 .stat-box Sparkline {
     width: 100%;
     height: 2;
-    margin: 1 0 0 0;
+    margin: 0;
 }
 
 Sparkline {
@@ -501,6 +515,19 @@ EntryDetailScreen {
 }
 
 #entry-detail-body {
+    color: #FFCC99;
+    height: auto;
+}
+
+#help-box {
+    width: 52;
+    height: auto;
+    border: round #9999CC;
+    background: #0a0a0a;
+    padding: 1 2;
+}
+
+#help-body {
     color: #FFCC99;
     height: auto;
 }
