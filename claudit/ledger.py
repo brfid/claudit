@@ -273,6 +273,13 @@ def recalc_ledger_costs(ledger_path: Path, ledger: Dict[str, Dict],
             new_total += old_cost
             continue
 
+        # Rescued/imported entries may lack a model field. Without it,
+        # calculate_cost silently falls back to Sonnet pricing, which would
+        # clobber correctly-priced historical costs. Skip them.
+        if not model:
+            new_total += old_cost
+            continue
+
         new_cost = calculate_cost(ti, to, cw, cr, model)
         new_savings = calculate_cache_savings(cr, model)
         new_total += new_cost
