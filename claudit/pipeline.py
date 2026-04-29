@@ -17,18 +17,16 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .collectors import collect_claude_code_data, collect_cline_data
-from .ledger import (
-    _new_ingest_state,
+from .ingest_state import (
     get_ingest_state_path,
     hours_since_last_ingest,
-    ingest,
     load_ingest_state,
+    new_ingest_state,
     prune_orphan_file_state,
-    rotate_backup,
     save_ingest_state,
-    save_ledger,
     stamp_ingest,
 )
+from .ledger import ingest, rotate_backup, save_ledger
 
 DEFAULT_MAX_GAP_HOURS = 24.0
 
@@ -72,10 +70,10 @@ def run_ingest(ledger_path: Path, ledger: Dict, source: str = "all",
         gap_triggered = True
 
     if force_ingest or not ledger:
-        ingest_state = _new_ingest_state()
+        ingest_state = new_ingest_state()
         mode = "rescan"
     elif deep:
-        ingest_state = _new_ingest_state()
+        ingest_state = new_ingest_state()
         mode = "deep"
     else:
         ingest_state = existing_state

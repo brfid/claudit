@@ -43,13 +43,12 @@ def aggregate_by_day(ledger: Dict[str, Dict],
     daily_data = defaultdict(init_field_dict)
     proj_needle = project_filter.lower() if project_filter else None
 
-    for entry_id, entry in ledger.items():
+    for entry in ledger.values():
         if source_filter and entry.get('source') != source_filter:
             continue
 
-        if proj_needle:
-            if proj_needle not in entry.get('project', '').lower():
-                continue
+        if proj_needle and proj_needle not in entry.get('project', '').lower():
+            continue
 
         try:
             dt = entry_local_dt(entry)

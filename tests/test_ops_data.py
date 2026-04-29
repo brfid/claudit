@@ -12,7 +12,6 @@ from claudit.ops_data import (
     model_color,
     percentile,
     row_activity_text,
-    row_preview_text,  # noqa: F401 — alias kept for back-compat
     short_model,
     short_project,
     short_tools,
@@ -318,12 +317,6 @@ class TestRowActivityText:
     def test_escapes_bracket_injection(self):
         r = row_activity_text({"promptPreview": "[b]fake[/b]"})
         assert "\\[b]fake" in r
-
-    def test_back_compat_alias(self):
-        # row_preview_text is still importable and behaves like row_activity_text
-        assert row_preview_text({"promptPreview": "x"}) == row_activity_text(
-            {"promptPreview": "x"}
-        )
 
 
 # ── group_by_prompt ───────────────────────────────────────────────────────

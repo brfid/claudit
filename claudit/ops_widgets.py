@@ -130,19 +130,32 @@ class HourlyBar(Horizontal):
             raise ValueError(f"HourlyBar expects 24 values, got {len(values)}")
         self._values = values
 
+    def _cell_markup(self, hour: int, v: float, mx: float) -> str:
+        if v <= 0:
+            glyph, color = self.EMPTY_GLYPH, self.EMPTY_COLOR
+        else:
+            idx = max(1, int(v / mx * (len(self.BLOCKS) - 1)))
+            glyph, color = self.BLOCKS[idx], self.FILL_COLOR
+        return f"[{color}]{glyph}[/]"
+
     def compose(self) -> ComposeResult:
         mx = max(self._values) if any(self._values) else 1.0
         for hour, v in enumerate(self._values):
-            if v <= 0:
-                glyph, color = self.EMPTY_GLYPH, self.EMPTY_COLOR
-            else:
-                idx = max(1, int(v / mx * (len(self.BLOCKS) - 1)))
-                glyph, color = self.BLOCKS[idx], self.FILL_COLOR
             classes = "hourly-cell"
             if hour % 6 == 0 and hour != 0:
                 classes += " hourly-cell-mark"
-            yield Static(f"[{color}]{glyph}[/]",
+            yield Static(self._cell_markup(hour, v, mx),
                          classes=classes, markup=True)
+
+    def update_values(self, values: List[float]) -> None:
+        """Update cell glyphs in place; preserves mounted children."""
+        if len(values) != 24:
+            return
+        self._values = values
+        mx = max(values) if any(values) else 1.0
+        cells = list(self.query(Static))
+        for hour, (cell, v) in enumerate(zip(cells, values)):
+            cell.update(self._cell_markup(hour, v, mx))
 
 
 # ── Interactive log row ───────────────────────────────────────────────────

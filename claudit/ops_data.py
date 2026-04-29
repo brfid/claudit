@@ -6,6 +6,7 @@ trivially testable and reusable across tabs.
 """
 
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -244,7 +245,7 @@ def short_model(model: Optional[str]) -> str:
 
 def model_color(short: str) -> str:
     """Return the LCARS hex color for a shortened model name's family."""
-    family = short.split("-")[0]
+    family = short.split("-", 1)[0]
     return MODEL_COLORS.get(family, "#CC9966")
 
 
@@ -351,10 +352,6 @@ def row_activity_text(entry: Dict) -> str:
     return "[dim]· —[/]"
 
 
-# Back-compat alias for any external callers / tests
-row_preview_text = row_activity_text
-
-
 def _format_k(num: int) -> str:
     """Tiny helper: 12345 → 12K. Avoids pulling format_number into this module."""
     if num >= 1_000_000:
@@ -362,3 +359,127 @@ def _format_k(num: int) -> str:
     if num >= 1_000:
         return f"{num // 1_000}K"
     return str(num)
+
+
+# ── Derived OPS view ──────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class RowSpec:
+    """One call-log row's data. Rendered into markup by the TUI layer."""
+    dt: datetime
+    entry_id: str
+    entry: Dict
+    is_anchor: bool
+    is_turn_end: bool
+    is_subagent: bool
+    spawn_cost: float
+    max_log_cost: float
+
+
+LOG_ROW_CAP = 100
+
+
+def build_row_specs(entries: List[Tuple], max_log_cost: float) -> List[RowSpec]:
+    """Compute per-row data specs once; reused for in-place selection updates.
+
+    Each spec describes one renderable call-log row (agent_spawn entries are
+    skipped; they're attributed via the subagent cost rollup).
+
+    Anchor detection: a row is an "anchor" if it's the first turn of a user
+    prompt (by promptId), or — for entries that lack a promptId — if it's a
+    session-head or end_turn row. Anchors get subagent cost rollups attached.
+    """
+    visible = entries[:LOG_ROW_CAP]
+
+    seen_prompt_ids: set = set()
+    seen_sessions_with_anchor: set = set()
+    sessions_with_end_turn = set()
+    for _, _, e in visible:
+        if (e.get("stopReason") or "") == "end_turn":
+            sess = e.get("session") or ""
+            if sess:
+                sessions_with_end_turn.add(sess)
+
+    sub_rollup = subagent_cost_rollup(entries)
+
+    specs: List[RowSpec] = []
+    for dt, entry_id, e in visible:
+        if e.get("source") == "agent_spawn":
+            continue
+
+        prompt_id = e.get("promptId") or ""
+        session = e.get("session") or ""
+        stop = e.get("stopReason") or ""
+
+        if prompt_id:
+            is_anchor = prompt_id not in seen_prompt_ids
+            if is_anchor:
+                seen_prompt_ids.add(prompt_id)
+            is_turn_end = stop == "end_turn"
+        else:
+            is_turn_end = stop == "end_turn"
+            is_session_head = (
+                session
+                and session not in sessions_with_end_turn
+                and session not in seen_sessions_with_anchor
+            )
+            is_anchor = is_turn_end or is_session_head
+            if is_anchor and session:
+                seen_sessions_with_anchor.add(session)
+
+        spawn_cost = 0.0
+        if is_anchor and session and session in sub_rollup:
+            spawn_cost = sub_rollup[session]
+
+        specs.append(RowSpec(
+            dt=dt,
+            entry_id=entry_id,
+            entry=e,
+            is_anchor=is_anchor,
+            is_turn_end=is_turn_end,
+            is_subagent=bool(e.get("isSubagent")),
+            spawn_cost=spawn_cost,
+            max_log_cost=max_log_cost,
+        ))
+    return specs
+
+
+@dataclass(frozen=True)
+class OpsView:
+    """Pre-computed numbers the OPS dashboard displays.
+
+    Single source of truth for both the initial render and in-place updates,
+    so the two code paths can't drift.
+    """
+    stats: Dict                 # raw aggregate_today result
+    today_cost: float
+    rate_per_hr: float
+    cache_eff: float            # percentage (0..100)
+    median_cost: float
+    p95_cost: float
+    max_call_cost: float
+    hour_cost: List[float]      # 24 floats
+
+
+def derive_ops_view(entries: List[Tuple], stats: Dict,
+                    now: Optional[datetime] = None) -> OpsView:
+    """Compute derived OPS numbers from `(entries, stats)` in one place."""
+    now = now or datetime.now()
+    if stats["first_dt"]:
+        elapsed_hrs = max((now - stats["first_dt"]).total_seconds() / 3600, 0.01)
+        rate_per_hr = stats["cost"] / elapsed_hrs
+    else:
+        rate_per_hr = 0.0
+    potential = stats["cost"] + stats["savings"]
+    cache_eff = (stats["savings"] / potential * 100) if potential > 0 else 0.0
+    costs = stats["costs"]
+    return OpsView(
+        stats=stats,
+        today_cost=stats["cost"],
+        rate_per_hr=rate_per_hr,
+        cache_eff=cache_eff,
+        median_cost=percentile(costs, 0.5),
+        p95_cost=percentile(costs, 0.95),
+        max_call_cost=costs[-1] if costs else 0.0,
+        hour_cost=hourly_cost_today(entries),
+    )

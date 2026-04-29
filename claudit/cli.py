@@ -5,10 +5,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-from .aggregation import aggregate_by_day, compute_date_window, format_output
-from .pipeline import run_ingest
+from .aggregation import aggregate_by_day, compute_date_window, entry_local_dt, format_output
 from .formatters import SOURCE_MAP
-from .ledger import get_ledger_path, load_ledger, recalc_ledger_costs
+from .ledger import (
+    backup_dir,
+    get_ingest_state_path,
+    get_ledger_path,
+    hours_since_last_ingest,
+    load_ingest_state,
+    load_ledger,
+    recalc_ledger_costs,
+)
+from .pipeline import run_ingest
 
 
 def _source_alias(value: str) -> str:
@@ -110,25 +118,23 @@ Examples:
     return parser.parse_args()
 
 
+def _format_bytes(size_bytes: int) -> str:
+    """Format a byte count as '12 B' / '1.5 KB' / '3.2 MB'."""
+    if size_bytes >= 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes} B"
+
+
 def print_ledger_stats(ledger_path: Path, ledger: Dict[str, Dict]) -> None:
     """Print ledger file stats — size, entry counts, date range, projects."""
-    from .aggregation import entry_local_dt
-    from .ledger import (
-        backup_dir, get_ingest_state_path, hours_since_last_ingest,
-        load_ingest_state,
-    )
-
     try:
         size_bytes = ledger_path.stat().st_size
     except OSError:
         size_bytes = 0
 
-    if size_bytes >= 1024 * 1024:
-        size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
-    elif size_bytes >= 1024:
-        size_str = f"{size_bytes / 1024:.1f} KB"
-    else:
-        size_str = f"{size_bytes} B"
+    size_str = _format_bytes(size_bytes)
 
     by_source: Dict[str, int] = {}
     by_project: Dict[str, int] = {}

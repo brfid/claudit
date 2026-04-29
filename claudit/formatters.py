@@ -20,18 +20,6 @@ FLOAT_FIELDS = {FIELD_COST, FIELD_CACHE_SAVINGS}
 
 SOURCE_MAP = {'claude-code': 'cc', 'cline': 'cline'}
 
-# Column configuration: (field_name, header, width, format_func)
-COLUMNS = [
-    ('date', 'Date', 12, str),
-    ('requests', 'Reqs', 8, lambda x: format_number(int(x))),
-    ('tokensIn', 'In (tok)', 10, lambda x: format_number(int(x))),
-    ('tokensOut', 'Out (tok)', 10, lambda x: format_number(int(x))),
-    ('cacheWrites', 'CW (tok)', 10, lambda x: format_number(int(x))),
-    ('cacheReads', 'CR (tok)', 10, lambda x: format_number(int(x))),
-    ('cacheSavings', 'Saved ($)', 10, lambda x: format_cost(x)),
-    ('cost', 'Cost ($)', 10, lambda x: format_cost(x)),
-]
-
 
 def init_field_dict() -> Dict:
     """Initialize a dictionary with zeros for all field names."""
@@ -42,9 +30,9 @@ def format_number(num: int) -> str:
     """Format large numbers with K, M, B suffixes (whole numbers)."""
     if num >= 1_000_000_000:
         return f"{round(num / 1_000_000_000)}B"
-    elif num >= 1_000_000:
+    if num >= 1_000_000:
         return f"{round(num / 1_000_000)}M"
-    elif num >= 1_000:
+    if num >= 1_000:
         return f"{round(num / 1_000)}K"
     return f"{num:,}"
 
@@ -54,6 +42,23 @@ def format_cost(amount: float) -> str:
     if abs(amount) < 1.0:
         return f"${amount:,.2f}"
     return f"${amount:,.0f}"
+
+
+def _fmt_int(x) -> str:
+    return format_number(int(x))
+
+
+# Column configuration: (field_name, header, width, format_func)
+COLUMNS = [
+    ('date', 'Date', 12, str),
+    ('requests', 'Reqs', 8, _fmt_int),
+    ('tokensIn', 'In (tok)', 10, _fmt_int),
+    ('tokensOut', 'Out (tok)', 10, _fmt_int),
+    ('cacheWrites', 'CW (tok)', 10, _fmt_int),
+    ('cacheReads', 'CR (tok)', 10, _fmt_int),
+    ('cacheSavings', 'Saved ($)', 10, format_cost),
+    ('cost', 'Cost ($)', 10, format_cost),
+]
 
 
 def format_tokens(num: int, compact: bool = False) -> str:

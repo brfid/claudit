@@ -1,5 +1,6 @@
 """Data collectors for Cline and Claude Code session files."""
 
+import functools
 import json
 import platform
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +12,7 @@ from .formatters import (
     FIELD_CACHE_READS, FIELD_CACHE_WRITES, FIELD_CACHE_SAVINGS,
     FIELD_COST, FIELD_TOKENS_IN, FIELD_TOKENS_OUT,
 )
-from .ledger import file_needs_processing, get_stored_user_text, update_file_state
+from .ingest_state import file_needs_processing, get_stored_user_text, update_file_state
 from .pricing import calculate_cache_savings, calculate_cost
 
 
@@ -159,21 +160,15 @@ def find_claude_code_session_files(base_path: Path) -> List[Path]:
     )
 
 
-def _project_from_session_path(session_file: Path) -> str:
-    """Derive a readable project path from a CC session file path.
+@functools.lru_cache(maxsize=512)
+def _resolve_project_slug(slug: str) -> str:
+    """Resolve a CC project slug like `-Users-bfidler-src-foo` to a readable path.
 
-    ~/.claude/projects/-Users-bfidler-src-techdocs-tools/abc.jsonl → ~/src/techdocs-tools
-
-    The slug uses dashes as path separators, but real directory names can also
-    contain dashes. We greedily match path components from left to right,
-    preferring the longest real directory name at each level.
+    Dashes serve double duty — path separator *and* legitimate character in
+    directory names. We greedily match the longest real directory at each
+    level, probing the filesystem with `is_dir()`. Cached by slug since every
+    session file in the same project resolves identically.
     """
-    projects_dir = get_claude_code_dir() / "projects"
-    try:
-        rel = session_file.relative_to(projects_dir)
-        slug = rel.parts[0]
-    except (ValueError, IndexError):
-        return ""
     parts = slug.lstrip("-").split("-")
     resolved = Path("/")
     i = 0
@@ -194,6 +189,20 @@ def _project_from_session_path(session_file: Path) -> str:
     if result.startswith(home):
         result = "~" + result[len(home):]
     return result
+
+
+def _project_from_session_path(session_file: Path) -> str:
+    """Derive a readable project path from a CC session file path.
+
+    ~/.claude/projects/-Users-bfidler-src-techdocs-tools/abc.jsonl → ~/src/techdocs-tools
+    """
+    projects_dir = get_claude_code_dir() / "projects"
+    try:
+        rel = session_file.relative_to(projects_dir)
+        slug = rel.parts[0]
+    except (ValueError, IndexError):
+        return ""
+    return _resolve_project_slug(slug)
 
 
 def _parse_ts(ts_str: str) -> datetime:
@@ -226,6 +235,119 @@ def _extract_user_text(obj: Dict) -> str:
     return ''
 
 
+def _scan_tool_uses(content, spawns: Dict, obj: Dict, msg_id: str,
+                    parent_session_id: str, last_prompt_id: str) -> list:
+    """Walk a message's content blocks once.
+
+    Returns the list of tool names invoked. Captures any `Agent` invocations
+    into `spawns` as synthetic ledger entries for subagent analytics.
+    """
+    tools: list = []
+    if not isinstance(content, list):
+        return tools
+    for block in content:
+        if not isinstance(block, dict) or block.get('type') != 'tool_use':
+            continue
+        name = block.get('name')
+        if name:
+            tools.append(name)
+        if name == 'Agent':
+            inp = block.get('input') or {}
+            spawn_id = block.get('id') or ""
+            if spawn_id:
+                spawns[f"spawn:{spawn_id}"] = {
+                    'spawn_id': spawn_id,
+                    'timestamp': obj.get('timestamp'),
+                    'parent_session': parent_session_id,
+                    'prompt_id': last_prompt_id,
+                    'subagent_type': inp.get('subagent_type') or '(none)',
+                    'description': (inp.get('description') or '')[:80],
+                    'invoking_msg_id': msg_id,
+                }
+    return tools
+
+
+def _walk_session_jsonl(session_file: Path, seek_offset: int,
+                        initial_user_text: str,
+                        verbose: bool) -> Tuple[Dict, Dict, int, str]:
+    """Scan a JSONL file once.
+
+    Returns ``(final_messages, spawns, last_good_offset, last_user_text)``.
+    Final messages are keyed by msg_id (only assistant records with a
+    ``stop_reason`` qualify — those are the billable turns).
+    """
+    final_messages: Dict = {}
+    spawns: Dict[str, Dict] = {}
+    last_good_offset = seek_offset
+    last_user_text = initial_user_text
+    last_prompt_id = ""
+    # Subagent (sidechain) files carry `sessionId` pointing to the parent
+    # session. We capture the first occurrence and reuse it for spawn
+    # attribution.
+    parent_session_id = ""
+
+    try:
+        with open(session_file, 'r') as f:
+            if seek_offset > 0:
+                f.seek(seek_offset)
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                line_end = f.tell()
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                last_good_offset = line_end
+                obj_type = obj.get('type')
+                if not parent_session_id:
+                    parent_session_id = obj.get('sessionId') or ""
+                pid = obj.get('promptId')
+                if pid:
+                    last_prompt_id = pid
+
+                if obj_type == 'user':
+                    text = _extract_user_text(obj)
+                    if text and not text.startswith('<'):
+                        last_user_text = text
+                    continue
+
+                if obj_type != 'assistant':
+                    continue
+
+                msg = obj.get('message', {})
+                usage = msg.get('usage')
+                msg_id = msg.get('id')
+                if not usage or not msg_id:
+                    continue
+
+                tools = _scan_tool_uses(
+                    msg.get('content'), spawns, obj, msg_id,
+                    parent_session_id, last_prompt_id,
+                )
+
+                stop_reason = msg.get('stop_reason')
+                if stop_reason is not None:
+                    final_messages[msg_id] = {
+                        'model': msg.get('model'),
+                        'usage': usage,
+                        'timestamp': obj.get('timestamp'),
+                        'stop_reason': stop_reason,
+                        'prompt_preview': last_user_text[:80],
+                        'tools': tools,
+                        'prompt_id': last_prompt_id,
+                        'parent_session': parent_session_id,
+                    }
+    except (IOError, OSError) as e:
+        if verbose:
+            print(f"Warning: Could not read {session_file}: {e}")
+        return {}, {}, seek_offset, last_user_text
+
+    return final_messages, spawns, last_good_offset, last_user_text
+
+
 def parse_claude_code_session(session_file: Path, verbose: bool = False,
                               seek_offset: int = 0,
                               initial_user_text: str = "") -> Tuple[Dict[str, Dict], int, str]:
@@ -249,102 +371,9 @@ def parse_claude_code_session(session_file: Path, verbose: bool = False,
     Returns:
       ``(entries, final_byte_offset, final_user_text)``.
     """
-    final_messages = {}
-    spawns: Dict[str, Dict] = {}
-    last_good_offset = seek_offset
-    last_user_text = initial_user_text
-    last_prompt_id = ""
-    # The parent session UUID is this file's own stem for top-level files.
-    # For subagent (sidechain) files, JSONL records carry `sessionId` pointing
-    # to the parent. We capture the first occurrence and reuse it for spawn
-    # attribution.
-    parent_session_id = ""
-
-    try:
-        with open(session_file, 'r') as f:
-            if seek_offset > 0:
-                f.seek(seek_offset)
-            while True:
-                line = f.readline()
-                if not line:
-                    break
-                line_end = f.tell()
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                last_good_offset = line_end
-
-                obj_type = obj.get('type')
-                if not parent_session_id:
-                    parent_session_id = obj.get('sessionId') or ""
-                pid = obj.get('promptId')
-                if pid:
-                    last_prompt_id = pid
-
-                if obj_type == 'user':
-                    text = _extract_user_text(obj)
-                    if text and not text.startswith('<'):
-                        last_user_text = text
-                    continue
-
-                if obj_type != 'assistant':
-                    continue
-
-                msg = obj.get('message', {})
-                usage = msg.get('usage')
-                if not usage:
-                    continue
-
-                msg_id = msg.get('id')
-                if not msg_id:
-                    continue
-
-                # Walk content blocks once: capture tool names + detect Agent spawns
-                tools = []
-                content = msg.get('content')
-                if isinstance(content, list):
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        if block.get('type') != 'tool_use':
-                            continue
-                        name = block.get('name')
-                        if name:
-                            tools.append(name)
-                        # Capture Agent invocations as synthetic ledger entries
-                        if name == 'Agent':
-                            inp = block.get('input') or {}
-                            spawn_id = block.get('id') or ""
-                            if spawn_id:
-                                spawns[f"spawn:{spawn_id}"] = {
-                                    'spawn_id': spawn_id,
-                                    'timestamp': obj.get('timestamp'),
-                                    'parent_session': parent_session_id,
-                                    'prompt_id': last_prompt_id,
-                                    'subagent_type': inp.get('subagent_type') or '(none)',
-                                    'description': (inp.get('description') or '')[:80],
-                                    'invoking_msg_id': msg_id,
-                                }
-
-                stop_reason = msg.get('stop_reason')
-                if stop_reason is not None:
-                    final_messages[msg_id] = {
-                        'model': msg.get('model'),
-                        'usage': usage,
-                        'timestamp': obj.get('timestamp'),
-                        'stop_reason': stop_reason,
-                        'prompt_preview': last_user_text[:80],
-                        'tools': tools,
-                        'prompt_id': last_prompt_id,
-                        'parent_session': parent_session_id,
-                    }
-
-    except (IOError, OSError) as e:
-        if verbose:
-            print(f"Warning: Could not read {session_file}: {e}")
-        return {}, seek_offset, last_user_text
+    final_messages, spawns, last_good_offset, last_user_text = _walk_session_jsonl(
+        session_file, seek_offset, initial_user_text, verbose,
+    )
 
     entries = {}
     for msg_id, data in final_messages.items():
