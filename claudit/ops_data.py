@@ -281,24 +281,60 @@ def cost_bar(cost: float, max_cost: float, width: int = 8) -> str:
     return "▓" * filled + "░" * (width - filled)
 
 
-def row_preview_text(entry: Dict) -> str:
-    """Preview text for a call-log row.
+def _escape_markup(s: str) -> str:
+    """Escape `[` so user data can't inject Textual markup."""
+    return s.replace("[", chr(92) + "[")
 
-    Prefers the captured user prompt. Falls back to a synthesized descriptor
-    built from available metadata so the row still reads meaningfully.
 
-    User-supplied prompt text is escaped so `[` characters in prompts can't
-    inject Textual markup (which would raise MarkupError at render time).
+def _tool_chain(tools: List[str], limit: int = 6) -> str:
+    """Render a tool sequence compactly: 'Read → Edit×3 → Bash'."""
+    if not tools:
+        return ""
+    runs: List[Tuple[str, int]] = []
+    for t in tools:
+        if runs and runs[-1][0] == t:
+            runs[-1] = (t, runs[-1][1] + 1)
+        else:
+            runs.append((t, 1))
+    parts = [f"{n}×{c}" if c > 1 else n for n, c in runs[:limit]]
+    if len(runs) > limit:
+        parts.append(f"+{len(runs) - limit}")
+    return " → ".join(parts)
+
+
+def row_activity_text(entry: Dict) -> str:
+    """Activity description for a call-log row.
+
+    Priority ladder (first match wins):
+      1. User prompt (promptPreview) — actual captured text
+      2. Agent spawn — show subagent type + description
+      3. Tool chain — sequence of tools used in this turn
+      4. Stop-reason detail — cache volume, subagent flag
+      5. Session tail — last resort
+
+    Every branch escapes user-supplied text so `[` can't inject Textual markup.
     """
+    if entry.get("source") == "agent_spawn":
+        stype = _escape_markup(entry.get("subagentType") or "(none)")
+        desc = _escape_markup(entry.get("description") or "")
+        short_type = stype.split(":")[-1] if ":" in stype else stype
+        if desc:
+            return f"[#CC99CC]↳ spawn[/] [#FFCC99]{short_type}[/] [dim]— {desc}[/]"
+        return f"[#CC99CC]↳ spawn[/] [#FFCC99]{short_type}[/]"
+
     raw = (entry.get("promptPreview") or "").replace("\n", " ").replace("\t", " ")
     clean = " ".join(raw.split())
     if clean:
-        # Escape `[` so bracketed user content can't inject markup
-        return f"[dim]»[/] {clean.replace('[', chr(92) + '[')}"
+        return f"[dim]»[/] {_escape_markup(clean)}"
+
+    tools = entry.get("tools") or []
+    if tools:
+        chain = _escape_markup(_tool_chain(tools))
+        return f"[dim]⚒[/] [#CC9966]{chain}[/]"
 
     bits = []
     stop = entry.get("stopReason")
-    if stop:
+    if stop and stop != "end_turn":
         bits.append(f"stop={stop}")
     cr = entry.get(FIELD_CACHE_READS, 0)
     cw = entry.get(FIELD_CACHE_WRITES, 0)
@@ -306,11 +342,17 @@ def row_preview_text(entry: Dict) -> str:
         bits.append(f"cache {_format_k(cr)}r/{_format_k(cw)}w")
     if entry.get("isSubagent"):
         bits.append("subagent turn")
+    if bits:
+        return f"[dim]· {' · '.join(bits)}[/]"
+
     sess = entry.get("session") or ""
     if sess:
-        bits.append(f"session {sess[:8]}")
-    detail = " · ".join(bits) if bits else "no prompt captured"
-    return f"[dim]· {detail}[/]"
+        return f"[dim]· session {sess[:8]}[/]"
+    return "[dim]· —[/]"
+
+
+# Back-compat alias for any external callers / tests
+row_preview_text = row_activity_text
 
 
 def _format_k(num: int) -> str:

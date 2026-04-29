@@ -38,7 +38,7 @@ from .ops_data import (
     hourly_cost_today,
     model_color,
     percentile,
-    row_preview_text,
+    row_activity_text,
     short_model,
     short_project,
     short_tools,
@@ -172,6 +172,11 @@ class CostTrackerApp(App):
         self._selected_row: int = -1
         # Cache sorted entries for expand-row + scroll (set by _build_ops)
         self._ops_entries_cache: list = []
+        # Per-row spec cache so selection moves don't rebuild labels
+        self._ops_row_specs: list = []
+        # Last-built ops aggregation keyed on ledger fingerprint
+        self._ops_agg_cache: Optional[dict] = None
+        self._ops_agg_fingerprint = None
 
     def _load_data(self):
         ledger_path = get_ledger_path(self._ledger_path_override)
@@ -197,6 +202,9 @@ class CostTrackerApp(App):
             for eid in current_ids - self._seen_ids:
                 self._new_entry_ids[eid] = self.NEW_ROW_HIGHLIGHT_TICKS
         self._seen_ids = current_ids
+        # Invalidate ops aggregation cache whenever the ledger is reloaded
+        self._ops_agg_cache = None
+        self._ops_agg_fingerprint = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="top-bar"):
@@ -268,9 +276,7 @@ class CostTrackerApp(App):
 
     def action_jump_top(self) -> None:
         if self._current_tab == "OPS" and self._ops_entries_cache:
-            self._selected_row = 0
-            self._render_tab("OPS")
-            self._scroll_selected_into_view()
+            self._set_selected_row(0)
         else:
             try:
                 self.query_one("#main-content", VerticalScroll).scroll_home(animate=False)
@@ -279,9 +285,7 @@ class CostTrackerApp(App):
 
     def action_jump_bottom(self) -> None:
         if self._current_tab == "OPS" and self._ops_entries_cache:
-            self._selected_row = min(100, len(self._ops_entries_cache)) - 1
-            self._render_tab("OPS")
-            self._scroll_selected_into_view()
+            self._set_selected_row(min(100, len(self._ops_entries_cache)) - 1)
         else:
             try:
                 self.query_one("#main-content", VerticalScroll).scroll_end(animate=False)
@@ -299,11 +303,10 @@ class CostTrackerApp(App):
             max_idx = min(100, len(self._ops_entries_cache)) - 1
             # If nothing selected, j/J starts at top; k/K starts at bottom
             if self._selected_row == -1:
-                self._selected_row = 0 if delta > 0 else max_idx
+                new_idx = 0 if delta > 0 else max_idx
             else:
-                self._selected_row = max(0, min(max_idx, self._selected_row + delta))
-            self._render_tab("OPS")
-            self._scroll_selected_into_view()
+                new_idx = max(0, min(max_idx, self._selected_row + delta))
+            self._set_selected_row(new_idx)
             return
         try:
             scroller = self.query_one("#main-content", VerticalScroll)
@@ -311,13 +314,38 @@ class CostTrackerApp(App):
             return
         scroller.scroll_relative(y=delta, animate=False)
 
-    def _scroll_selected_into_view(self) -> None:
+    def _set_selected_row(self, new_idx: int) -> None:
+        """Move selection in place without rebuilding the whole OPS panel.
+
+        Updates the previously-selected row (if any) and the new one, then
+        scrolls the new one into view. Falls back to a full rerender only
+        when row widgets aren't mounted yet (first draw).
+        """
+        prev = self._selected_row
+        self._selected_row = new_idx
+        if not self._ops_row_specs:
+            self._render_tab("OPS")
+            return
         try:
             rows = list(self.query(LogRow))
-            if 0 <= self._selected_row < len(rows):
-                rows[self._selected_row].scroll_visible(animate=False)
         except Exception:
-            pass
+            self._render_tab("OPS")
+            return
+        if not rows:
+            self._render_tab("OPS")
+            return
+        # Update only the two rows whose state changed
+        for idx in {prev, new_idx}:
+            if 0 <= idx < len(rows) and idx < len(self._ops_row_specs):
+                spec = self._ops_row_specs[idx]
+                text, row_class = self._render_row_spec(spec, selected=(idx == new_idx))
+                rows[idx].update(text)
+                rows[idx].set_classes(row_class)
+        if 0 <= new_idx < len(rows):
+            try:
+                rows[new_idx].scroll_visible(animate=False)
+            except Exception:
+                pass
 
     def action_expand_selected(self) -> None:
         """Show modal with full prompt + metadata for the selected entry.
@@ -335,8 +363,7 @@ class CostTrackerApp(App):
         """Clicking a log row selects it."""
         if self._current_tab != "OPS":
             return
-        self._selected_row = message.row_index
-        self._render_tab("OPS")
+        self._set_selected_row(message.row_index)
 
     def on_click(self, event: Click) -> None:
         """Click outside a log row clears selection on OPS tab."""
@@ -350,8 +377,7 @@ class CostTrackerApp(App):
                 return
             w = getattr(w, "parent", None)
         if self._selected_row != -1:
-            self._selected_row = -1
-            self._render_tab("OPS")
+            self._set_selected_row(-1)
 
     @staticmethod
     def _tab_slug(tab_name: str) -> str:
@@ -897,13 +923,26 @@ class CostTrackerApp(App):
     # ── OPS tab ──
 
 
+    def _get_ops_aggregation(self):
+        """Return (entries, stats) for today, cached across selection moves.
+
+        Invalidated by _load_data when the ledger changes; within a single
+        refresh cycle, repeated j/k navigation reuses the same aggregation.
+        """
+        fingerprint = (id(self._ledger), len(self._ledger), self._source_filter)
+        if self._ops_agg_cache is not None and self._ops_agg_fingerprint == fingerprint:
+            return self._ops_agg_cache
+        entries = collect_entries(self._ledger, self._source_filter)
+        stats = aggregate_today(entries, short_project, short_model)
+        self._ops_agg_cache = (entries, stats)
+        self._ops_agg_fingerprint = fingerprint
+        return self._ops_agg_cache
+
     def _build_ops(self) -> Widget:
         now = datetime.now()
 
-        entries = collect_entries(self._ledger, self._source_filter)
+        entries, s = self._get_ops_aggregation()
         self._ops_entries_cache = entries
-
-        s = aggregate_today(entries, short_project, short_model)
 
         if s["first_dt"]:
             elapsed_hrs = max((now - s["first_dt"]).total_seconds() / 3600, 0.01)
@@ -1134,19 +1173,44 @@ class CostTrackerApp(App):
         log_children: list[Widget] = [Label(
             f"   {'TIME':<8} {'MODEL':<12} {'IN':>5} {'OUT':>5} "
             f"{'CACHE':>11} {'COST':>7} {'·':<8} {'↳':<1} "
-            f"{'TOOLS':<8} {'PROJECT':<14} PROMPT",
+            f"{'TOOLS':<8} {'PROJECT':<14} ACTIVITY",
             classes="ops-log-header",
         )]
 
-        row_count = min(100, len(entries))
+        specs = self._build_row_specs(entries, max_log_cost)
+        self._ops_row_specs = specs
+
+        row_count = len(specs)
         if self._selected_row >= row_count:
             self._selected_row = row_count - 1 if row_count else -1
 
+        for idx, spec in enumerate(specs):
+            text, row_class = self._render_row_spec(
+                spec, selected=(idx == self._selected_row),
+            )
+            log_children.append(LogRow(
+                text,
+                classes=row_class,
+                markup=True,
+                row_index=idx,
+            ))
+
+        log_panel = Vertical(*log_children, classes="ops-panel ops-panel-log")
+        log_panel.border_title = "◖ CALL LOG ◗"
+        log_panel.border_subtitle = f"{row_count} most recent"
+        stats_children.append(log_panel)
+
+        return Vertical(*stats_children, classes="chart-panel")
+
+    def _build_row_specs(self, entries: list, max_log_cost: float) -> list:
+        """Compute per-row data specs once; reused for in-place selection updates.
+
+        Returns a list of dicts — one per renderable row (agent_spawn entries
+        are skipped, they're attributed via the subagent cost rollup).
+        """
+        row_count = min(100, len(entries))
         visible = entries[:row_count]
-        # Anchor logic: prefer promptId (true turn boundary). Within a run of
-        # entries sharing a promptId, only the newest is shown as anchor.
-        # Fallback: for entries missing promptId (pre-rescan data), use the
-        # old end_turn + session-head heuristic.
+
         seen_prompt_ids: set = set()
         seen_sessions_with_anchor: set = set()
         sessions_with_end_turn = set()
@@ -1156,19 +1220,18 @@ class CostTrackerApp(App):
                 if sess:
                     sessions_with_end_turn.add(sess)
 
-        # Subagent-cost attribution: which sessions were spawned from today's
-        # entries (maps parent_session → total subagent cost).
         sub_rollup = subagent_cost_rollup(entries)
 
-        for idx, (dt, entry_id, e) in enumerate(visible):
+        specs: list = []
+        for dt, entry_id, e in visible:
             if e.get("source") == "agent_spawn":
-                continue  # rendered implicitly via rollup, skip direct row
+                continue
+
             prompt_id = e.get("promptId") or ""
             session = e.get("session") or ""
             stop = e.get("stopReason") or ""
 
             if prompt_id:
-                # True anchor: first time we see this promptId (newest-first scan)
                 is_anchor = prompt_id not in seen_prompt_ids
                 if is_anchor:
                     seen_prompt_ids.add(prompt_id)
@@ -1184,68 +1247,88 @@ class CostTrackerApp(App):
                 if is_anchor and session:
                     seen_sessions_with_anchor.add(session)
 
-            short_m = short_model(e.get("model"))
-            color = model_color(short_m)
-            tok_in = format_number(e.get(FIELD_TOKENS_IN, 0))
-            tok_out = format_number(e.get(FIELD_TOKENS_OUT, 0))
-            cr = e.get(FIELD_CACHE_READS, 0)
-            cw = e.get(FIELD_CACHE_WRITES, 0)
-            cache_str = f"{format_number(cr)}/{format_number(cw)}"
-            cost_val = e.get(FIELD_COST, 0)
-            # Attribute subagent spend to parent turn anchor (C rollup)
             spawn_cost = 0.0
             if is_anchor and session and session in sub_rollup:
                 spawn_cost = sub_rollup[session]
-            display_cost = cost_val + spawn_cost
-            cost = format_cost(display_cost)
-            bar = cost_bar(display_cost, max_log_cost)
-            proj = short_project(e.get("project", ""))[:14]
-            is_subagent = bool(e.get("isSubagent"))
-            kind_marker = "[#9999CC]↳[/]" if is_subagent else " "
-            time_str = dt.strftime("%H:%M:%S")
-            tools_str = short_tools(e.get("tools") or [])[:8]
-            if is_anchor:
-                preview = row_preview_text(e)
-                if spawn_cost > 0:
-                    preview += f" [dim #9999CC](+{format_cost(spawn_cost)} subagents)[/]"
+
+            specs.append({
+                "dt": dt,
+                "entry_id": entry_id,
+                "entry": e,
+                "is_anchor": is_anchor,
+                "is_turn_end": is_turn_end,
+                "is_subagent": bool(e.get("isSubagent")),
+                "spawn_cost": spawn_cost,
+                "max_log_cost": max_log_cost,
+            })
+        return specs
+
+    def _render_row_spec(self, spec: dict, selected: bool) -> tuple:
+        """Render a row spec into (markup_text, css_class_string)."""
+        e = spec["entry"]
+        dt = spec["dt"]
+        is_anchor = spec["is_anchor"]
+        is_turn_end = spec["is_turn_end"]
+        is_subagent = spec["is_subagent"]
+        spawn_cost = spec["spawn_cost"]
+        max_log_cost = spec["max_log_cost"]
+        entry_id = spec["entry_id"]
+
+        short_m = short_model(e.get("model"))
+        color = model_color(short_m)
+        tok_in = format_number(e.get(FIELD_TOKENS_IN, 0))
+        tok_out = format_number(e.get(FIELD_TOKENS_OUT, 0))
+        cr = e.get(FIELD_CACHE_READS, 0)
+        cw = e.get(FIELD_CACHE_WRITES, 0)
+        cache_str = f"{format_number(cr)}/{format_number(cw)}"
+        cost_val = e.get(FIELD_COST, 0)
+        display_cost = cost_val + spawn_cost
+        cost = format_cost(display_cost)
+        bar = cost_bar(display_cost, max_log_cost)
+        proj = short_project(e.get("project", ""))[:14]
+        kind_marker = "[#9999CC]↳[/]" if is_subagent else " "
+        time_str = dt.strftime("%H:%M:%S")
+        tools_str = short_tools(e.get("tools") or [])[:8]
+
+        if is_anchor:
+            activity = row_activity_text(e)
+            if spawn_cost > 0:
+                activity += f" [dim #9999CC](+{format_cost(spawn_cost)} subagents)[/]"
+        else:
+            # Continuation rows: show what this particular call did rather
+            # than a blank dot. Tool chain if present, else fall through.
+            tools = e.get("tools") or []
+            if tools:
+                activity = row_activity_text(e)
             else:
-                preview = "[dim]  ⋮[/]"
-            is_new = entry_id in self._new_entry_ids
-            is_selected = idx == self._selected_row
-            if is_selected:
-                marker = "►"
-            elif is_anchor:
-                marker = "▶" if is_turn_end else "◆"
-            elif is_new:
-                marker = "★"
-            else:
-                marker = " "
+                activity = "[dim]  ⋮[/]"
 
-            row_classes = "ops-log-row"
-            if is_selected:
-                row_classes += " ops-log-row-selected"
-            elif is_new:
-                row_classes += " ops-log-row-new"
-            elif not is_anchor:
-                row_classes += " ops-log-row-cont"
-            elif is_subagent:
-                row_classes += " ops-log-row-subagent"
+        is_new = entry_id in self._new_entry_ids
+        if selected:
+            marker = "►"
+        elif is_anchor:
+            marker = "▶" if is_turn_end else "◆"
+        elif is_new:
+            marker = "★"
+        else:
+            marker = " "
 
-            log_children.append(LogRow(
-                f"{marker} {time_str:<8} [{color}]{short_m:<12}[/] "
-                f"{tok_in:>5} {tok_out:>5} {cache_str:>11} {cost:>7} "
-                f"{bar:<8} {kind_marker} {tools_str:<8} {proj:<14} {preview}",
-                classes=row_classes,
-                markup=True,
-                row_index=idx,
-            ))
+        row_classes = "ops-log-row"
+        if selected:
+            row_classes += " ops-log-row-selected"
+        elif is_new:
+            row_classes += " ops-log-row-new"
+        elif not is_anchor:
+            row_classes += " ops-log-row-cont"
+        elif is_subagent:
+            row_classes += " ops-log-row-subagent"
 
-        log_panel = Vertical(*log_children, classes="ops-panel ops-panel-log")
-        log_panel.border_title = "◖ CALL LOG ◗"
-        log_panel.border_subtitle = f"{row_count} most recent"
-        stats_children.append(log_panel)
-
-        return Vertical(*stats_children, classes="chart-panel")
+        text = (
+            f"{marker} {time_str:<8} [{color}]{short_m:<12}[/] "
+            f"{tok_in:>5} {tok_out:>5} {cache_str:>11} {cost:>7} "
+            f"{bar:<8} {kind_marker} {tools_str:<8} {proj:<14} {activity}"
+        )
+        return text, row_classes
 
 
 if __name__ == "__main__":

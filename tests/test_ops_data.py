@@ -11,7 +11,8 @@ from claudit.ops_data import (
     hourly_cost_today,
     model_color,
     percentile,
-    row_preview_text,
+    row_activity_text,
+    row_preview_text,  # noqa: F401 — alias kept for back-compat
     short_model,
     short_project,
     short_tools,
@@ -257,29 +258,72 @@ class TestAggregateToday:
         assert s["costs"] == [1.0, 2.0]
 
 
-# ── row_preview_text ──────────────────────────────────────────────────────
+# ── row_activity_text ─────────────────────────────────────────────────────
 
-class TestRowPreviewText:
-    def test_with_prompt(self):
-        r = row_preview_text({"promptPreview": "hello world"})
+class TestRowActivityText:
+    def test_prompt_wins(self):
+        r = row_activity_text({"promptPreview": "hello world"})
         assert "hello world" in r
         assert "»" in r
 
-    def test_empty_falls_back_to_stop(self):
-        r = row_preview_text({"stopReason": "tool_use"})
-        assert "stop=tool_use" in r
+    def test_agent_spawn_shows_type_and_desc(self):
+        r = row_activity_text({
+            "source": "agent_spawn",
+            "subagentType": "compound-engineering:research:ce-web-researcher",
+            "description": "Web research on X",
+        })
+        assert "spawn" in r
+        assert "ce-web-researcher" in r
+        assert "Web research on X" in r
 
-    def test_subagent_flag(self):
-        r = row_preview_text({"isSubagent": True, "stopReason": "end_turn"})
+    def test_agent_spawn_without_desc(self):
+        r = row_activity_text({
+            "source": "agent_spawn",
+            "subagentType": "Explore",
+        })
+        assert "spawn" in r
+        assert "Explore" in r
+
+    def test_tool_chain_when_no_prompt(self):
+        r = row_activity_text({"tools": ["Read", "Edit", "Edit", "Bash"]})
+        assert "Read" in r
+        assert "Edit×2" in r
+        assert "Bash" in r
+        assert "→" in r
+
+    def test_stop_fallback_ignores_end_turn(self):
+        r = row_activity_text({"stopReason": "end_turn"})
+        assert "stop=" not in r
+
+    def test_stop_fallback_keeps_unusual(self):
+        r = row_activity_text({"stopReason": "max_tokens"})
+        assert "stop=max_tokens" in r
+
+    def test_subagent_flag_in_fallback(self):
+        r = row_activity_text({"isSubagent": True, "stopReason": "end_turn"})
         assert "subagent turn" in r
 
-    def test_no_data(self):
-        r = row_preview_text({})
-        assert "no prompt captured" in r
+    def test_session_tail_last_resort(self):
+        r = row_activity_text({"session": "abcdef123456"})
+        assert "abcdef12" in r
+
+    def test_fully_empty(self):
+        r = row_activity_text({})
+        assert r.endswith("—[/]")
 
     def test_collapses_whitespace(self):
-        r = row_preview_text({"promptPreview": "hi\n\n\t  there"})
+        r = row_activity_text({"promptPreview": "hi\n\n\t  there"})
         assert "hi there" in r
+
+    def test_escapes_bracket_injection(self):
+        r = row_activity_text({"promptPreview": "[b]fake[/b]"})
+        assert "\\[b]fake" in r
+
+    def test_back_compat_alias(self):
+        # row_preview_text is still importable and behaves like row_activity_text
+        assert row_preview_text({"promptPreview": "x"}) == row_activity_text(
+            {"promptPreview": "x"}
+        )
 
 
 # ── group_by_prompt ───────────────────────────────────────────────────────
