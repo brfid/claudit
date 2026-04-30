@@ -1,6 +1,5 @@
 """LCARS-themed TUI dashboard for claudit."""
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -24,11 +23,9 @@ from .formatters import (
     FIELD_TOKENS_IN,
     FIELD_TOKENS_OUT,
     SOURCE_MAP,
-    calculate_totals,
     format_cost,
     format_number,
     format_tokens,
-    init_field_dict,
 )
 from .ledger import get_ledger_path, load_ledger
 from .pipeline import run_ingest
@@ -36,24 +33,24 @@ from .ops_data import (
     LOG_ROW_CAP,
     OpsView,
     RowSpec,
-    aggregate_today,
     build_row_specs,
-    collect_entries,
     cost_bar,
-    derive_ops_view,
     model_color,
     row_activity_text,
     short_model,
     short_project,
     short_tools,
 )
+from .live_metrics import LiveMetrics, MetricsSnapshot, compute_snapshot
 from .ops_widgets import (
     EntryDetailScreen,
     FluidBar,
     HelpScreen,
-    HourlyBar,
+    LiveBorderSubtitle,
+    LiveHourlyBar,
+    LiveLabel,
+    LiveStatBox,
     LogRow,
-    StatBox,
 )
 
 TABS = ["OVERVIEW", "DAILY", "CUMULATIVE", "CALENDAR", "TOKENS",
@@ -133,29 +130,6 @@ _STOP_COLORS = {
 }
 
 
-@dataclass
-class OpsRefs:
-    """Handles for in-place updates to OPS widgets.
-
-    Populated by `_build_ops` during a full render; consumed by
-    `_update_ops_in_place` so each 30s tick mutates label text rather than
-    rebuilding the DOM.
-    """
-    calls_value: Optional[Label] = None
-    calls_detail: Optional[Label] = None
-    cost_value: Optional[Label] = None
-    cost_detail: Optional[Label] = None
-    cache_value: Optional[Label] = None
-    cache_detail: Optional[Label] = None
-    tokens_value: Optional[Label] = None
-    tokens_detail: Optional[Label] = None
-    percall_value: Optional[Label] = None
-    percall_detail: Optional[Label] = None
-    hourly_wrap: Optional[Widget] = None
-    log_panel: Optional[Widget] = None
-    session_panel: Optional[Widget] = None
-
-
 class CostTrackerApp(App):
     CSS_PATH = Path(__file__).resolve().parent / "lcars.tcss"
     TITLE = "CLAUDIT"
@@ -209,19 +183,20 @@ class CostTrackerApp(App):
         self._seen_ids: set = set()
         # Selected row index in OPS call log; -1 means no selection
         self._selected_row: int = -1
-        # Cache sorted entries for expand-row + scroll (set by _build_ops)
-        self._ops_entries_cache: list = []
         # Per-row spec cache so selection moves don't rebuild labels
         self._ops_row_specs: List[RowSpec] = []
-        # Last-built ops aggregation keyed on ledger fingerprint
-        self._ops_agg_cache: Optional[tuple] = None
-        self._ops_agg_fingerprint = None
-        # Fingerprint of what was last rendered — ticks skip render when unchanged
-        self._last_render_fp = None
-        # References to OPS widgets for in-place updates (populated by _build_ops)
-        self._ops_refs = OpsRefs()
+        # Reactive snapshot carrier — mounted in compose(); every live
+        # widget subscribes to its `snapshot` attribute.
+        self._metrics = LiveMetrics()
+        # Last chart-data signature; charts only rebuild when this changes.
+        self._last_daily_sig: Optional[tuple] = None
 
-    def _load_data(self):
+    def _load_data(self) -> MetricsSnapshot:
+        """Reload ledger, recompute aggregates, push a fresh snapshot.
+
+        Returns the new snapshot so callers can inspect its signatures
+        to decide whether a chart rebuild is warranted.
+        """
         ledger_path = get_ledger_path(self._ledger_path_override)
         self._ledger = load_ledger(ledger_path)
 
@@ -245,11 +220,28 @@ class CostTrackerApp(App):
             for eid in current_ids - self._seen_ids:
                 self._new_entry_ids[eid] = self.NEW_ROW_HIGHLIGHT_TICKS
         self._seen_ids = current_ids
-        # Invalidate ops aggregation cache whenever the ledger is reloaded
-        self._ops_agg_cache = None
-        self._ops_agg_fingerprint = None
+
+        snap = compute_snapshot(
+            self._ledger, self._daily, self._source_filter,
+        )
+        self._metrics.update(snap)
+        return snap
+
+    @property
+    def _snapshot(self) -> Optional[MetricsSnapshot]:
+        return self._metrics.snapshot
+
+    @property
+    def _ops_entries_cache(self) -> list:
+        """Back-compat accessor for OPS row selection + detail modal."""
+        snap = self._snapshot
+        return snap.ops_entries if snap else []
 
     def compose(self) -> ComposeResult:
+        # Non-visible reactive carrier. Every live widget watches its
+        # `snapshot` attribute.
+        yield self._metrics
+
         with Horizontal(id="top-bar"):
             yield Static(datetime.now().strftime("%m·%d"), id="top-elbow")
             yield Static("CLAUDIT", id="top-title")
@@ -277,10 +269,10 @@ class CostTrackerApp(App):
     COMPACT_SIDEBAR_ROWS = 45
 
     def on_mount(self) -> None:
-        self._load_data()
+        snap = self._load_data()
+        self._last_daily_sig = snap.daily_signature
         self._update_status_bar()
         self._render_tab("OVERVIEW")
-        self._last_render_fp = self._ledger_fingerprint()
         self._refresh_timer = self.set_interval(
             self.REFRESH_INTERVAL, self._auto_refresh_tick
         )
@@ -315,26 +307,37 @@ class CostTrackerApp(App):
             f"{refresh_icon} {self.REFRESH_INTERVAL}s{new_badge}{hint}  ",
         )
 
-    def _ledger_fingerprint(self):
-        # Include highlight tick sum so `★` markers redraw when they age out
-        return (len(self._ledger),
-                sum(self._new_entry_ids.values()),
-                self._current_tab)
+    # Tabs whose content is pure-chart (plotext/heatmap). These don't
+    # subscribe to LiveMetrics reactively, so their tick-time refresh path
+    # is a full `_render_tab` — but only when the underlying daily data
+    # (or hourly grid, for COST MAP) actually changed.
+    _CHART_TABS = frozenset({
+        "DAILY", "CUMULATIVE", "CALENDAR", "TOKENS", "CACHE",
+        "REQUESTS", "COST MAP", "CALLS",
+    })
 
     def _auto_refresh_tick(self) -> None:
         if not self._auto_refresh:
             return
         self._force_ingest = False
-        self._load_data()
+        snap = self._load_data()
         self._update_status_bar()
-        fp = self._ledger_fingerprint()
-        if fp == self._last_render_fp:
-            return
-        self._last_render_fp = fp
-        # On OPS, try in-place update to avoid DOM rebuild flash
-        if self._current_tab == "OPS" and self._update_ops_in_place():
-            return
-        self._render_tab(self._current_tab)
+
+        # Live tabs (OVERVIEW, OPS) self-update via reactive watchers.
+        # Chart tabs need an explicit rebuild, but only when data changed —
+        # minute rollovers alone shouldn't redraw plotext.
+        if (self._current_tab in self._CHART_TABS
+                and snap.daily_signature != self._last_daily_sig):
+            self._last_daily_sig = snap.daily_signature
+            self._render_tab(self._current_tab)
+        else:
+            self._last_daily_sig = snap.daily_signature
+
+        # OPS call-log rows aren't reactive (each row's markup depends on
+        # per-row selected/new state). Refresh them in place when the row
+        # contents changed.
+        if self._current_tab == "OPS":
+            self._refresh_log_rows()
 
     def action_toggle_refresh(self) -> None:
         self._auto_refresh = not self._auto_refresh
@@ -471,12 +474,10 @@ class CostTrackerApp(App):
             tab_name = self._SLUG_TO_TAB.get(slug, slug.upper())
             self._activate_nav(tab_name)
             self._render_tab(tab_name)
-            self._last_render_fp = self._ledger_fingerprint()
 
     def action_tab(self, tab_name: str) -> None:
         self._activate_nav(tab_name)
         self._render_tab(tab_name)
-        self._last_render_fp = self._ledger_fingerprint()
 
     def _render_tab(self, tab_name: str) -> None:
         self._current_tab = tab_name
@@ -556,96 +557,59 @@ class CostTrackerApp(App):
     # ── Overview tab ──
 
     def _build_overview(self) -> Widget:
-        sorted_days = sorted(self._daily.keys())
-        last_30 = sorted_days[-30:] if len(sorted_days) > 30 else sorted_days
-        data_30 = {d: self._daily[d] for d in last_30}
-        totals = calculate_totals(data_30)
+        """OVERVIEW stats row — every value binds to the snapshot.
 
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        today = datetime.now()
-        today_data = self._daily.get(today_str, init_field_dict())
-
-        last_7 = sorted_days[-7:] if len(sorted_days) >= 7 else sorted_days
-        last_28 = sorted_days[-28:] if len(sorted_days) >= 28 else sorted_days
-
-        spark_7d_cost = [self._daily[d][FIELD_COST] for d in last_7]
-
-        week_costs: List[float] = []
-        for i in range(0, len(last_28), 7):
-            chunk = last_28[i:i + 7]
-            week_costs.append(sum(self._daily[d][FIELD_COST] for d in chunk))
-        spark_4w = week_costs if week_costs else [0.0]
-
-        tokens_in_7d = [self._daily[d][FIELD_TOKENS_IN] for d in last_7]
-        tokens_out_7d = [self._daily[d][FIELD_TOKENS_OUT] for d in last_7]
-        spark_7d_tokens = [i + o for i, o in zip(tokens_in_7d, tokens_out_7d)]
-
-        spark_7d_cache: List[float] = []
-        for d in last_7:
-            dd = self._daily[d]
-            potential = dd[FIELD_COST] + dd[FIELD_CACHE_SAVINGS]
-            spark_7d_cache.append(
-                dd[FIELD_CACHE_SAVINGS] / potential * 100 if potential > 0 else 0
-            )
-
-        spark_30d_cost = [self._daily[d][FIELD_COST] for d in last_30]
-
-        spark_burn: List[float] = []
-        for i in range(len(last_30)):
-            window = last_30[max(0, i - 6):i + 1]
-            avg = sum(self._daily[d][FIELD_COST] for d in window) / len(window)
-            spark_burn.append(avg)
-
-        this_week_start = (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
-        last_week_start = (today - timedelta(days=today.weekday() + 7)).strftime("%Y-%m-%d")
-        this_week_cost = sum(
-            d[FIELD_COST] for day, d in self._daily.items()
-            if this_week_start <= day <= today_str
-        )
-        last_week_cost = sum(
-            d[FIELD_COST] for day, d in self._daily.items()
-            if last_week_start <= day < this_week_start
-        )
-        if last_week_cost > 0:
-            wow_delta = ((this_week_cost - last_week_cost) / last_week_cost) * 100
-            wow_detail = f"{'↑' if wow_delta >= 0 else '↓'} {abs(wow_delta):.0f}% vs last week"
-        else:
-            wow_detail = "no prior week data"
-
-        potential_30 = totals[FIELD_COST] + totals[FIELD_CACHE_SAVINGS]
-        cache_eff = (
-            f"{totals[FIELD_CACHE_SAVINGS] / potential_30 * 100:.0f}% efficiency"
-            if potential_30 > 0 else ""
-        )
-
-        burn_rate = sum(spark_7d_cost) / len(last_7) if last_7 else 0
+        Minute ticks and new-entry ticks both produce a new snapshot; the
+        LiveStatBox children re-render in place.
+        """
+        m = lambda snap: snap.overview  # noqa: E731
 
         stats_row = Horizontal(
-            StatBox("TODAY", format_cost(today_data[FIELD_COST]),
-                    f"{today_data[FIELD_REQUESTS]:,} requests",
-                    spark_data=spark_7d_cost, spark_label="7d cost ▸",
-                    classes="stat-box"),
-            StatBox("THIS WEEK", format_cost(this_week_cost),
-                    wow_detail,
-                    spark_data=spark_4w, spark_label="4wk weekly ▸",
-                    classes="stat-box"),
-            StatBox("30-DAY", format_cost(totals[FIELD_COST]),
-                    f"{format_number(totals[FIELD_REQUESTS])} requests",
-                    spark_data=spark_30d_cost, spark_label="30d daily ▸",
-                    classes="stat-box"),
-            StatBox("TOKENS (7d)", format_tokens(sum(spark_7d_tokens)),
-                    f"{format_tokens(sum(tokens_in_7d))} in / "
-                    f"{format_tokens(sum(tokens_out_7d))} out",
-                    spark_data=spark_7d_tokens, spark_label="7d tokens ▸",
-                    classes="stat-box"),
-            StatBox("CACHE HIT", format_cost(totals[FIELD_CACHE_SAVINGS]),
-                    cache_eff,
-                    spark_data=spark_7d_cache, spark_label="7d efficiency ▸",
-                    classes="stat-box"),
-            StatBox("BURN RATE", f"{format_cost(burn_rate)}/day",
-                    "7-day rolling avg",
-                    spark_data=spark_burn, spark_label="30d avg ▸",
-                    classes="stat-box"),
+            LiveStatBox(
+                self._metrics, "TODAY",
+                value_selector=lambda s: format_cost(m(s).today_cost),
+                detail_selector=lambda s: f"{m(s).today_requests:,} requests",
+                spark_selector=lambda s: m(s).spark_7d_cost,
+                spark_label="7d cost ▸", classes="stat-box",
+            ),
+            LiveStatBox(
+                self._metrics, "THIS WEEK",
+                value_selector=lambda s: format_cost(m(s).this_week_cost),
+                detail_selector=lambda s: m(s).wow_detail,
+                spark_selector=lambda s: m(s).spark_4w,
+                spark_label="4wk weekly ▸", classes="stat-box",
+            ),
+            LiveStatBox(
+                self._metrics, "30-DAY",
+                value_selector=lambda s: format_cost(m(s).month_cost),
+                detail_selector=lambda s: f"{format_number(m(s).month_requests)} requests",
+                spark_selector=lambda s: m(s).spark_30d_cost,
+                spark_label="30d daily ▸", classes="stat-box",
+            ),
+            LiveStatBox(
+                self._metrics, "TOKENS (7d)",
+                value_selector=lambda s: format_tokens(m(s).tokens_7d_total),
+                detail_selector=lambda s: (
+                    f"{format_tokens(m(s).tokens_7d_in)} in / "
+                    f"{format_tokens(m(s).tokens_7d_out)} out"
+                ),
+                spark_selector=lambda s: m(s).spark_7d_tokens,
+                spark_label="7d tokens ▸", classes="stat-box",
+            ),
+            LiveStatBox(
+                self._metrics, "CACHE HIT",
+                value_selector=lambda s: format_cost(m(s).cache_savings_30d),
+                detail_selector=lambda s: m(s).cache_eff_label,
+                spark_selector=lambda s: m(s).spark_7d_cache,
+                spark_label="7d efficiency ▸", classes="stat-box",
+            ),
+            LiveStatBox(
+                self._metrics, "BURN RATE",
+                value_selector=lambda s: f"{format_cost(m(s).burn_rate)}/day",
+                detail_selector=lambda s: "7-day rolling avg",
+                spark_selector=lambda s: m(s).spark_burn,
+                spark_label="30d avg ▸", classes="stat-box",
+            ),
             id="overview-panel",
         )
 
@@ -982,173 +946,131 @@ class CostTrackerApp(App):
     # ── OPS tab ──
 
 
-    def _get_ops_aggregation(self):
-        """Return (entries, stats) for today, cached across selection moves.
+    def _refresh_log_rows(self) -> None:
+        """Re-render OPS call-log rows from the current snapshot.
 
-        Invalidated by _load_data when the ledger changes; within a single
-        refresh cycle, repeated j/k navigation reuses the same aggregation.
+        Row markup depends on per-row state (selected, is_new) that isn't
+        captured by the snapshot, so each tick we regenerate specs and
+        mutate rows in place. A row-count change triggers a full tab
+        rebuild — that's a structural edit the mounted widgets can't
+        absorb.
         """
-        fingerprint = (id(self._ledger), len(self._ledger), self._source_filter)
-        if self._ops_agg_cache is not None and self._ops_agg_fingerprint == fingerprint:
-            return self._ops_agg_cache
-        entries = collect_entries(self._ledger, self._source_filter)
-        stats = aggregate_today(entries, short_project, short_model)
-        self._ops_agg_cache = (entries, stats)
-        self._ops_agg_fingerprint = fingerprint
-        return self._ops_agg_cache
+        snap = self._snapshot
+        if snap is None:
+            return
+        entries = snap.ops_entries
 
-    def _update_ops_in_place(self) -> bool:
-        """Update OPS widgets without rebuilding the DOM.
-
-        Returns True if updated, False if fallback to full rerender is needed
-        (structural change: different panel set or different row count).
-        """
-        refs = self._ops_refs
-        if refs.session_panel is None:
-            return False
-
-        entries, stats = self._get_ops_aggregation()
-        self._ops_entries_cache = entries
-        view = derive_ops_view(entries, stats)
-
-        self._apply_stat_labels(refs, view)
-
-        if refs.hourly_wrap is not None:
-            refs.hourly_wrap.border_subtitle = (
-                f"cost per hour · today {format_cost(view.today_cost)}"
-            )
-            try:
-                refs.hourly_wrap.query_one(HourlyBar).update_values(view.hour_cost)
-            except Exception:
-                return False
-
-        return self._update_log_rows_in_place(entries)
-
-    def _apply_stat_labels(self, refs: OpsRefs, view: OpsView) -> None:
-        """Mutate the session-stats labels to reflect `view`."""
-        s = view.stats
-
-        def set_text(lbl: Optional[Label], text: str) -> None:
-            if lbl is not None:
-                lbl.update(text)
-
-        set_text(refs.calls_value, f" [#FF9900]{s['count']:,}[/]")
-        set_text(refs.calls_detail, f" [dim]{s['subagent_count']:,} subagent[/]")
-        set_text(refs.cost_value, f" [#FF9900]{format_cost(view.today_cost)}[/]")
-        set_text(refs.cost_detail, f" [dim]{format_cost(view.rate_per_hr)}/hr[/]")
-        set_text(refs.cache_value, f" [#FF9900]{view.cache_eff:.0f}%[/]")
-        set_text(refs.cache_detail, f" [dim]saved {format_cost(s['savings'])}[/]")
-        set_text(refs.tokens_value,
-                 f" [#FF9900]{format_tokens(s['tokens_in'] + s['tokens_out'])}[/]")
-        set_text(refs.tokens_detail,
-                 f" [dim]{format_tokens(s['tokens_in'])} in · "
-                 f"{format_tokens(s['tokens_out'])} out[/]")
-        set_text(refs.percall_value, f" [#FF9900]{format_cost(view.median_cost)}[/]")
-        set_text(refs.percall_detail,
-                 f" [dim]P95 {format_cost(view.p95_cost)} · "
-                 f"max {format_cost(view.max_call_cost)}[/]")
-
-    def _update_log_rows_in_place(self, entries: list) -> bool:
-        """Re-render every call-log row; fall back on row-count mismatch.
-
-        Row-count changes imply structural edits (new entries, dropped ones)
-        that the current mounted widgets can't absorb — caller does a full
-        rerender in that case.
-        """
         max_log_cost = max(
             (e.get(FIELD_COST, 0) for _, _, e in entries[:LOG_ROW_CAP]),
             default=0,
         )
         specs = build_row_specs(entries, max_log_cost)
         if len(specs) != len(self._ops_row_specs):
-            return False
+            self._render_tab("OPS")
+            return
         self._ops_row_specs = specs
         try:
             rows = list(self.query(LogRow))
         except Exception:
-            return False
+            return
         if len(rows) != len(specs):
-            return False
+            self._render_tab("OPS")
+            return
         for idx, (row, spec) in enumerate(zip(rows, specs)):
             text, row_class = self._render_row_spec(
                 spec, selected=(idx == self._selected_row),
             )
             row.update(text)
             row.set_classes(row_class)
-        if self._ops_refs.log_panel is not None:
-            self._ops_refs.log_panel.border_subtitle = f"{len(specs)} most recent"
-        return True
 
     def _build_ops(self) -> Widget:
-        """Build the full OPS tab. Panels are built by dedicated helpers."""
-        self._ops_refs = OpsRefs()
+        """Build the full OPS tab.
 
-        entries, stats = self._get_ops_aggregation()
-        self._ops_entries_cache = entries
-        view = derive_ops_view(entries, stats)
+        Session-panel cells, hourly bar, and border subtitles all bind to
+        the current snapshot through Live widgets — no OpsRefs, no hand-
+        rolled in-place update. Ranking panels and the call log still
+        rebuild on tab render, since their row set is structurally
+        variable.
+        """
+        snap = self._snapshot
+        if snap is None:
+            return Vertical(classes="chart-panel")
 
-        children: list[Widget] = [self._build_session_panel(view)]
-        ranking_row = self._build_ranking_panels(view)
+        children: list[Widget] = [self._build_session_panel()]
+        ranking_row = self._build_ranking_panels(snap.ops)
         if ranking_row is not None:
             children.append(ranking_row)
-        children.append(self._build_log_panel(entries))
+        children.append(self._build_log_panel(snap.ops_entries))
 
         return Vertical(*children, classes="chart-panel")
 
     # ── OPS panel builders ──
 
-    def _build_stat_cell(self, label: str, value: str, detail: str,
-                         accent: str, value_attr: str,
-                         detail_attr: str) -> Vertical:
-        """One big stat cell. Registers value/detail Labels on self._ops_refs."""
+    def _build_live_stat_cell(self, label: str, accent: str,
+                              value_selector, detail_selector) -> Vertical:
+        """One big stat cell bound to snapshot selectors."""
         cls = "ops-stat-cell"
         if accent:
             cls += f" ops-stat-cell-{accent}"
-        value_lbl = Label(f" [#FF9900]{value}[/]",
-                          classes="ops-stat-cell-value", markup=True)
-        detail_lbl = Label(f" [dim]{detail}[/]",
-                           classes="ops-stat-cell-detail", markup=True)
-        setattr(self._ops_refs, value_attr, value_lbl)
-        setattr(self._ops_refs, detail_attr, detail_lbl)
         return Vertical(
-            Label(f" [#9999CC]{label}[/]", classes="ops-stat-cell-label", markup=True),
-            value_lbl,
-            detail_lbl,
+            Label(f" [#9999CC]{label}[/]",
+                  classes="ops-stat-cell-label", markup=True),
+            LiveLabel(
+                self._metrics,
+                lambda s: f" [#FF9900]{value_selector(s)}[/]",
+                classes="ops-stat-cell-value",
+            ),
+            LiveLabel(
+                self._metrics,
+                lambda s: f" [dim]{detail_selector(s)}[/]",
+                classes="ops-stat-cell-detail",
+            ),
             classes=cls,
         )
 
-    def _build_session_panel(self, view: OpsView) -> Widget:
-        """Top SESSION STATS panel — 5 big stat cells over the hourly bar."""
-        s = view.stats
+    def _build_session_panel(self) -> Widget:
+        """Top SESSION STATS panel — 5 live stat cells over the hourly bar."""
+        ops = lambda snap: snap.ops         # noqa: E731
+        stats = lambda snap: snap.ops.stats  # noqa: E731
+
         session_row = Horizontal(
-            self._build_stat_cell(
-                "CALLS", f"{s['count']:,}",
-                f"{s['subagent_count']:,} subagent", "",
-                "calls_value", "calls_detail"),
-            self._build_stat_cell(
-                "COST", format_cost(view.today_cost),
-                f"{format_cost(view.rate_per_hr)}/hr", "alt",
-                "cost_value", "cost_detail"),
-            self._build_stat_cell(
-                "CACHE", f"{view.cache_eff:.0f}%",
-                f"saved {format_cost(s['savings'])}", "accent",
-                "cache_value", "cache_detail"),
-            self._build_stat_cell(
-                "TOKENS",
-                format_tokens(s['tokens_in'] + s['tokens_out']),
-                f"{format_tokens(s['tokens_in'])} in · "
-                f"{format_tokens(s['tokens_out'])} out", "alt",
-                "tokens_value", "tokens_detail"),
-            self._build_stat_cell(
-                "PER-CALL", format_cost(view.median_cost),
-                f"P95 {format_cost(view.p95_cost)} · "
-                f"max {format_cost(view.max_call_cost)}", "",
-                "percall_value", "percall_detail"),
+            self._build_live_stat_cell(
+                "CALLS", "",
+                value_selector=lambda s: f"{stats(s)['count']:,}",
+                detail_selector=lambda s: f"{stats(s)['subagent_count']:,} subagent",
+            ),
+            self._build_live_stat_cell(
+                "COST", "alt",
+                value_selector=lambda s: format_cost(ops(s).today_cost),
+                detail_selector=lambda s: f"{format_cost(ops(s).rate_per_hr)}/hr",
+            ),
+            self._build_live_stat_cell(
+                "CACHE", "accent",
+                value_selector=lambda s: f"{ops(s).cache_eff:.0f}%",
+                detail_selector=lambda s: f"saved {format_cost(stats(s)['savings'])}",
+            ),
+            self._build_live_stat_cell(
+                "TOKENS", "alt",
+                value_selector=lambda s: format_tokens(
+                    stats(s)['tokens_in'] + stats(s)['tokens_out']
+                ),
+                detail_selector=lambda s: (
+                    f"{format_tokens(stats(s)['tokens_in'])} in · "
+                    f"{format_tokens(stats(s)['tokens_out'])} out"
+                ),
+            ),
+            self._build_live_stat_cell(
+                "PER-CALL", "",
+                value_selector=lambda s: format_cost(ops(s).median_cost),
+                detail_selector=lambda s: (
+                    f"P95 {format_cost(ops(s).p95_cost)} · "
+                    f"max {format_cost(ops(s).max_call_cost)}"
+                ),
+            ),
             classes="ops-stat-row",
         )
 
-        hourly_wrap = self._build_hourly_wrap(view)
-        self._ops_refs.hourly_wrap = hourly_wrap
+        hourly_wrap = self._build_hourly_wrap()
 
         session_panel = Vertical(
             session_row, hourly_wrap,
@@ -1156,13 +1078,15 @@ class CostTrackerApp(App):
         )
         session_panel.border_title = "◖ SESSION STATS ◗"
         session_panel.border_subtitle = "today"
-        self._ops_refs.session_panel = session_panel
         return session_panel
 
-    @staticmethod
-    def _build_hourly_wrap(view: OpsView) -> Widget:
-        """24-cell hourly bar + tick axis, wrapped with border title."""
-        spark = HourlyBar(view.hour_cost, classes="ops-hourly-spark")
+    def _build_hourly_wrap(self) -> Widget:
+        """24-cell hourly bar + tick axis, bound to snapshot."""
+        spark = LiveHourlyBar(
+            self._metrics,
+            lambda s: s.ops.hour_cost,
+            classes="ops-hourly-spark",
+        )
         axis_cells: list[Widget] = []
         for h in range(24):
             lbl = f"{h:02d}" if (h % 6 == 0 or h == 23) else " "
@@ -1170,11 +1094,16 @@ class CostTrackerApp(App):
                 f"[dim]{lbl}[/]", classes="hourly-axis", markup=True,
             ))
         axis = Horizontal(*axis_cells, classes="ops-hourly-axis")
+        # LiveBorderSubtitle is display:none — it exists only to mutate
+        # `wrap.border_subtitle` when the snapshot changes. Constructing
+        # it requires a `wrap` reference, so we build it after.
         wrap = Vertical(spark, axis, classes="ops-hourly-wrap")
         wrap.border_title = "◖ HOURLY ACTIVITY ◗"
-        wrap.border_subtitle = (
-            f"cost per hour · today {format_cost(view.today_cost)}"
-        )
+        wrap.compose_add_child(LiveBorderSubtitle(
+            self._metrics,
+            lambda s: f"cost per hour · today {format_cost(s.ops.today_cost)}",
+            parent_widget=wrap,
+        ))
         return wrap
 
     def _build_ranking_panels(self, view: OpsView) -> Optional[Widget]:
@@ -1327,7 +1256,14 @@ class CostTrackerApp(App):
         panel = Vertical(*children, classes="ops-panel ops-panel-log")
         panel.border_title = "◖ CALL LOG ◗"
         panel.border_subtitle = f"{len(specs)} most recent"
-        self._ops_refs.log_panel = panel
+        # Live subtitle: "N most recent" changes only on row-count flips,
+        # which already trigger a tab rebuild — still, binding it keeps
+        # subtitle/body in lockstep even if _refresh_log_rows shortcuts.
+        panel.compose_add_child(LiveBorderSubtitle(
+            self._metrics,
+            lambda s: f"{min(len(s.ops_entries), LOG_ROW_CAP)} most recent",
+            parent_widget=panel,
+        ))
         return panel
 
     @staticmethod

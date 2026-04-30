@@ -5,7 +5,7 @@ themselves given data; they do not know about the ledger, aggregation, or the
 app shell.
 """
 
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -13,6 +13,7 @@ from textual.containers import Horizontal, Vertical
 from textual.events import Click
 from textual.message import Message
 from textual.screen import ModalScreen
+from textual.widget import Widget
 from textual.widgets import Label, Sparkline, Static
 
 from .formatters import (
@@ -23,34 +24,6 @@ from .formatters import (
     FIELD_TOKENS_IN,
     FIELD_TOKENS_OUT,
 )
-
-
-# ── Static readout ────────────────────────────────────────────────────────
-
-class StatBox(Static):
-    """Single stat readout with optional sparkline below."""
-
-    def __init__(self, label: str, value: str, detail: str = "",
-                 spark_data: Optional[List[float]] = None,
-                 spark_label: str = "", **kwargs):
-        super().__init__(**kwargs)
-        self._label = label
-        self._value = value
-        self._detail = detail
-        self._spark_data = spark_data
-        self._spark_label = spark_label
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="stat-text"):
-            yield Label(self._label, classes="stat-label")
-            yield Label(self._value, classes="stat-value")
-            if self._detail:
-                yield Label(self._detail, classes="stat-detail")
-        if self._spark_data and any(v > 0 for v in self._spark_data):
-            with Vertical(classes="stat-spark"):
-                yield Sparkline(self._spark_data, summary_function=max)
-                if self._spark_label:
-                    yield Label(self._spark_label, classes="spark-caption")
 
 
 # ── Fluid-width bars ──────────────────────────────────────────────────────
@@ -265,3 +238,173 @@ class EntryDetailScreen(ModalScreen):
             Static("\n".join(lines), id="entry-detail-body"),
             id="entry-detail-box",
         )
+
+
+# ── Bindable widgets ──────────────────────────────────────────────────────
+#
+# These subscribe to a `LiveMetrics` carrier and rewrite their content when
+# the current `MetricsSnapshot` changes. They eliminate the OpsRefs registry
+# and the `_apply_stat_labels` / `_update_ops_in_place` pair by making every
+# live value a self-updating widget.
+
+class LiveLabel(Label):
+    """Label bound to a `MetricsSnapshot` field via a selector.
+
+    Parameters:
+      live: The `LiveMetrics` carrier to subscribe to.
+      selector: `(snapshot) -> str`. Returns the full rendered markup.
+      placeholder: Shown before the first snapshot arrives.
+    """
+
+    def __init__(self, live, selector: Callable, placeholder: str = "",
+                 markup: bool = True, **kwargs):
+        super().__init__(placeholder, markup=markup, **kwargs)
+        self._live = live
+        self._selector = selector
+
+    def on_mount(self) -> None:
+        self.watch(self._live, "snapshot", self._on_snapshot, init=True)
+
+    def _on_snapshot(self, snap) -> None:
+        if snap is None:
+            return
+        try:
+            text = self._selector(snap)
+        except Exception:
+            return
+        self.update(text)
+
+
+class LiveStatic(Static):
+    """Static bound to a `MetricsSnapshot` field. Same API as `LiveLabel`."""
+
+    def __init__(self, live, selector: Callable, placeholder: str = "",
+                 markup: bool = True, **kwargs):
+        super().__init__(placeholder, markup=markup, **kwargs)
+        self._live = live
+        self._selector = selector
+
+    def on_mount(self) -> None:
+        self.watch(self._live, "snapshot", self._on_snapshot, init=True)
+
+    def _on_snapshot(self, snap) -> None:
+        if snap is None:
+            return
+        try:
+            text = self._selector(snap)
+        except Exception:
+            return
+        self.update(text)
+
+
+class LiveBorderSubtitle(Static):
+    """Zero-height helper: updates its parent panel's border_subtitle.
+
+    Trick: watchers run on any Widget. We use a 0-content Static mounted
+    inside the panel that owns the border. Avoids restructuring panel
+    builders just to bind border text.
+    """
+
+    DEFAULT_CSS = "LiveBorderSubtitle { display: none; }"
+
+    def __init__(self, live, selector: Callable, parent_widget: Widget,
+                 **kwargs):
+        super().__init__("", **kwargs)
+        self._live = live
+        self._selector = selector
+        self._parent_widget = parent_widget
+
+    def on_mount(self) -> None:
+        self.watch(self._live, "snapshot", self._on_snapshot, init=True)
+
+    def _on_snapshot(self, snap) -> None:
+        if snap is None:
+            return
+        try:
+            text = self._selector(snap)
+        except Exception:
+            return
+        self._parent_widget.border_subtitle = text
+
+
+class LiveHourlyBar(HourlyBar):
+    """HourlyBar that re-reads its 24 values from the snapshot."""
+
+    def __init__(self, live, selector: Callable, **kwargs):
+        super().__init__([0.0] * 24, **kwargs)
+        self._live = live
+        self._selector = selector
+
+    def on_mount(self) -> None:
+        self.watch(self._live, "snapshot", self._on_snapshot, init=True)
+
+    def _on_snapshot(self, snap) -> None:
+        if snap is None:
+            return
+        try:
+            values = self._selector(snap)
+        except Exception:
+            return
+        self.update_values(values)
+
+
+class LiveSparkline(Sparkline):
+    """Sparkline bound to a list-valued snapshot selector."""
+
+    def __init__(self, live, selector: Callable, summary_function=max,
+                 **kwargs):
+        super().__init__([0.0], summary_function=summary_function, **kwargs)
+        self._live = live
+        self._selector = selector
+
+    def on_mount(self) -> None:
+        self.watch(self._live, "snapshot", self._on_snapshot, init=True)
+
+    def _on_snapshot(self, snap) -> None:
+        if snap is None:
+            return
+        try:
+            values = self._selector(snap)
+        except Exception:
+            return
+        if values and any(v > 0 for v in values):
+            self.data = values
+
+
+# ── Bindable StatBox ──────────────────────────────────────────────────────
+
+class LiveStatBox(Static):
+    """StatBox whose value/detail/sparkline react to snapshot changes.
+
+    Replaces the original `StatBox` for live panels. The static label stays
+    fixed; value/detail/sparkline bind through selectors.
+    """
+
+    def __init__(self, live, label: str,
+                 value_selector: Callable,
+                 detail_selector: Optional[Callable] = None,
+                 spark_selector: Optional[Callable] = None,
+                 spark_label: str = "",
+                 **kwargs):
+        super().__init__(**kwargs)
+        self._live = live
+        self._label = label
+        self._value_selector = value_selector
+        self._detail_selector = detail_selector
+        self._spark_selector = spark_selector
+        self._spark_label = spark_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="stat-text"):
+            yield Label(self._label, classes="stat-label")
+            yield LiveLabel(self._live, self._value_selector,
+                            classes="stat-value")
+            if self._detail_selector is not None:
+                yield LiveLabel(self._live, self._detail_selector,
+                                classes="stat-detail")
+        if self._spark_selector is not None:
+            with Vertical(classes="stat-spark"):
+                yield LiveSparkline(self._live, self._spark_selector,
+                                    summary_function=max)
+                if self._spark_label:
+                    yield Label(self._spark_label, classes="spark-caption")
