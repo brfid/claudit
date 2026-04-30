@@ -36,16 +36,16 @@ pip install -e '.[tui]'
 
 ## Get started
 
-Run with no arguments to see the last 30 active days across all sources:
+Run with no arguments to launch the interactive dashboard:
 
 ```bash
 claudit
 ```
 
-Launch the interactive dashboard:
+Print a text report instead:
 
 ```bash
-claudit --tui
+claudit --report
 ```
 
 ## Usage
@@ -53,9 +53,9 @@ claudit --tui
 ### Filter by time range
 
 ```bash
-claudit --days 7                               # Last 7 active days
-claudit --all                                  # All days with activity
-claudit --from 2026-04-01 --to 2026-04-30     # Specific range
+claudit --report --days 7                              # Last 7 active days
+claudit --report --all                                 # All days with activity
+claudit --report --from 2026-04-01 --to 2026-04-30    # Specific range
 ```
 
 `--from` / `--to` are inclusive ISO dates. When either is set, it overrides `--days`.
@@ -116,7 +116,7 @@ claudit --recalc            # Rewrite costs in the ledger
 
 ## Dashboard
 
-Launch with `claudit --tui`.
+Launch with `claudit` (the default mode).
 
 ### Tabs
 

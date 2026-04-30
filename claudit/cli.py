@@ -31,18 +31,32 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  claudit.py                       # Both sources, last 30 active days
-  claudit.py --days 7              # Last 7 active days
-  claudit.py --all                 # All days with activity
-  claudit.py --source cline        # Cline only
-  claudit.py --source claude-code  # Claude Code only
-  claudit.py --tui                 # Interactive dashboard
-  claudit.py --cached              # Report from stored data, skip scanning
-  claudit.py --rescan              # Rescan all files from scratch
-  claudit.py --deep                # Re-parse every file (dedups; data-safe)
-  claudit.py --recalc --dry-run    # Preview cost correction without writing
-  claudit.py --recalc              # Rewrite ledger costs using current rates
+  claudit                       # Interactive dashboard (default)
+  claudit --report              # Text report, last 30 active days
+  claudit --report --days 7     # Last 7 active days
+  claudit --report --all        # All days with activity
+  claudit --source cline        # Dashboard, Cline only
+  claudit --source claude-code  # Dashboard, Claude Code only
+  claudit --cached              # Skip scanning live sources
+  claudit --rescan              # Rescan all files from scratch
+  claudit --deep                # Re-parse every file (dedups; data-safe)
+  claudit --stats               # Print ledger stats and exit
+  claudit --recalc --dry-run    # Preview cost correction without writing
+  claudit --recalc              # Rewrite ledger costs using current rates
         """
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        '--report', action='store_true',
+        help='print text report instead of launching dashboard'
+    )
+    mode.add_argument(
+        '--stats', action='store_true',
+        help='print ledger stats (entry count, size, date range) and exit'
+    )
+    mode.add_argument(
+        '--recalc', action='store_true',
+        help='recompute cost/savings in ledger using current rates, then exit'
     )
     parser.add_argument(
         '--days', type=int, default=30, metavar='N',
@@ -70,10 +84,6 @@ Examples:
         help='include only entries on or before this date'
     )
     parser.add_argument(
-        '--stats', action='store_true',
-        help='print ledger stats (entry count, size, date range) and exit'
-    )
-    parser.add_argument(
         '--cached', action='store_true',
         help='report from stored data only, skip scanning live sources'
     )
@@ -92,14 +102,6 @@ Examples:
     parser.add_argument(
         '--verbose', '-v', action='store_true',
         help='show detailed source discovery and error information'
-    )
-    parser.add_argument(
-        '--tui', action='store_true',
-        help='launch interactive dashboard (requires textual, textual-plotext)'
-    )
-    parser.add_argument(
-        '--recalc', action='store_true',
-        help='recompute cost/savings in ledger using current rates, then exit'
     )
     parser.add_argument(
         '--dry-run', action='store_true',
@@ -194,20 +196,9 @@ def print_ledger_stats(ledger_path: Path, ledger: Dict[str, Dict]) -> None:
 def main():
     args = parse_arguments()
 
-    if args.tui:
-        try:
-            from claudit.tui import CostTrackerApp
-        except ImportError:
-            print("TUI requires: pip install 'claudit[tui]'")
-            return 1
-        app = CostTrackerApp(
-            ledger_path_override=args.ledger_path,
-            source_filter=args.source,
-            no_ingest=args.cached,
-            force_ingest=args.rescan,
-        )
-        app.run()
-        return 0
+    if args.dry_run and not args.recalc:
+        print("--dry-run only applies with --recalc")
+        return 2
 
     ledger_path = get_ledger_path(args.ledger_path)
     ledger = load_ledger(ledger_path)
@@ -226,6 +217,21 @@ def main():
 
     if args.stats:
         print_ledger_stats(ledger_path, ledger)
+        return 0
+
+    if not args.report:
+        try:
+            from claudit.tui import CostTrackerApp
+        except ImportError:
+            print("TUI requires: pip install 'claudit[tui]'")
+            return 1
+        app = CostTrackerApp(
+            ledger_path_override=args.ledger_path,
+            source_filter=args.source,
+            no_ingest=args.cached,
+            force_ingest=args.rescan,
+        )
+        app.run()
         return 0
 
     added = run_ingest(ledger_path, ledger, source=args.source,
