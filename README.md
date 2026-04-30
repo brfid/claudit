@@ -116,7 +116,7 @@ claudit --recalc            # Rewrite costs in the ledger
 
 ## Dashboard
 
-Launch with `claudit` (the default mode).
+Launch with `claudit` (the default mode). Styled after [LCARS](https://en.wikipedia.org/wiki/LCARS).
 
 ### Tabs
 
@@ -127,10 +127,10 @@ Number keys `1`–`0` switch tabs:
 | `1` | OVERVIEW | Six stat boxes with sparklines (today, this week, 30-day, tokens, cache, burn rate) |
 | `2` | DAILY | Daily cost line chart |
 | `3` | CUMULATIVE | Running total cost |
-| `4` | CALENDAR | 13-week cost heatmap (GitHub-style) |
+| `4` | CALENDAR | 40-week cost heatmap (GitHub-style) |
 | `5` | TOKENS | Input/output/cache bar chart |
 | `6` | CACHE | Savings vs efficiency |
-| `7` | REQUESTS | 13-week activity heatmap |
+| `7` | REQUESTS | 40-week activity heatmap |
 | `8` | COST MAP | Cost by hour × day-of-week |
 | `9` | CALLS | Per-call cost distribution histogram |
 | `0` | OPS | Live session stats, project breakdown, model mix, call log |

@@ -79,7 +79,9 @@ Screen {
 
 #sidebar {
     dock: left;
-    width: 14;
+    width: 14%;
+    min-width: 12;
+    max-width: 20;
     background: #000000;
     padding: 0;
 }
@@ -106,6 +108,21 @@ Screen {
 
 .nav-button:focus {
     background: #FF9900;
+}
+
+/* Compact sidebar: 1-row buttons for short terminals */
+#sidebar.compact .nav-button {
+    height: 1;
+    margin-bottom: 0;
+    background: #000000;
+    color: #CC9966;
+}
+
+#sidebar.compact .nav-button:hover,
+#sidebar.compact .nav-button.active,
+#sidebar.compact .nav-button:focus {
+    background: #000000;
+    color: #FF9900;
 }
 
 /* ── Main content ── */

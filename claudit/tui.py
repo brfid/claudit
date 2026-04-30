@@ -273,6 +273,9 @@ class CostTrackerApp(App):
             yield Static("", id="bottom-status")
             yield Static("", id="bottom-bar-line")
 
+    # Terminal height below this triggers compact sidebar (1-row nav buttons)
+    COMPACT_SIDEBAR_ROWS = 45
+
     def on_mount(self) -> None:
         self._load_data()
         self._update_status_bar()
@@ -281,6 +284,20 @@ class CostTrackerApp(App):
         self._refresh_timer = self.set_interval(
             self.REFRESH_INTERVAL, self._auto_refresh_tick
         )
+        self._apply_sidebar_density()
+
+    def on_resize(self, event) -> None:
+        self._apply_sidebar_density()
+
+    def _apply_sidebar_density(self) -> None:
+        try:
+            sidebar = self.query_one("#sidebar")
+        except Exception:
+            return
+        if self.size.height < self.COMPACT_SIDEBAR_ROWS:
+            sidebar.add_class("compact")
+        else:
+            sidebar.remove_class("compact")
 
     def _update_status_bar(self) -> None:
         entry_count = len(self._ledger)
@@ -738,12 +755,12 @@ class CostTrackerApp(App):
             f"Peak: {peak_day[5:] if peak_day else '—'} ({peak_count:,})"
         )
         return self._make_chart(
-            "ACTIVITY HEATMAP — REQUESTS (13 weeks)", draw, subtitle,
+            "ACTIVITY HEATMAP — REQUESTS (40 weeks)", draw, subtitle,
         )
 
     # ── Calendar heatmap (GitHub-style) ──
 
-    CALENDAR_WEEKS = 13
+    CALENDAR_WEEKS = 40
 
     @staticmethod
     def _build_weeks_grid(daily_values: Dict[str, float], num_weeks: int = CALENDAR_WEEKS):
@@ -793,7 +810,7 @@ class CostTrackerApp(App):
             f"Peak: {format_cost(max_cost)}"
         )
         return self._make_chart(
-            "CALENDAR HEATMAP — DAILY COST (13 weeks)", draw, subtitle,
+            "CALENDAR HEATMAP — DAILY COST (40 weeks)", draw, subtitle,
         )
 
     # ── Spend heatmap (cost by hour × day-of-week) ──
