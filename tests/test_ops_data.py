@@ -7,7 +7,6 @@ from claudit.ops_data import (
     aggregate_today,
     collect_entries,
     cost_bar,
-    group_by_prompt,
     hourly_cost_today,
     model_color,
     percentile,
@@ -317,91 +316,6 @@ class TestRowActivityText:
     def test_escapes_bracket_injection(self):
         r = row_activity_text({"promptPreview": "[b]fake[/b]"})
         assert "\\[b]fake" in r
-
-
-# ── group_by_prompt ───────────────────────────────────────────────────────
-
-class TestGroupByPrompt:
-    def _entries(self):
-        t0 = datetime.now()
-        return [
-            (t0, "cc:1", {
-                "source": "cc", "ts": t0.isoformat(),
-                "promptId": "p1", "session": "s1",
-                "cost": 1.0, "tokensIn": 100, "tokensOut": 50,
-                "cacheReads": 0, "cacheWrites": 0,
-                "tools": ["Read"], "stopReason": "tool_use",
-                "model": "claude-opus-4-6", "promptPreview": "anchor text",
-                "isSubagent": False, "project": "p",
-            }),
-            (t0 - timedelta(seconds=5), "cc:2", {
-                "source": "cc", "ts": t0.isoformat(),
-                "promptId": "p1", "session": "s1",
-                "cost": 2.0, "tokensIn": 200, "tokensOut": 100,
-                "cacheReads": 0, "cacheWrites": 0,
-                "tools": ["Edit"], "stopReason": "end_turn",
-                "model": "claude-opus-4-6", "promptPreview": "",
-                "isSubagent": False, "project": "p",
-            }),
-            (t0 - timedelta(minutes=2), "cc:3", {
-                "source": "cc", "ts": t0.isoformat(),
-                "promptId": "p2", "session": "s1",
-                "cost": 0.5, "tokensIn": 50, "tokensOut": 25,
-                "cacheReads": 0, "cacheWrites": 0,
-                "tools": [], "stopReason": "end_turn",
-                "model": "claude-sonnet-4-5", "promptPreview": "second prompt",
-                "isSubagent": False, "project": "p",
-            }),
-        ]
-
-    def test_groups_share_prompt_id(self):
-        groups = group_by_prompt(self._entries())
-        assert len(groups) == 2
-        by_id = {g["prompt_id"]: g for g in groups}
-        assert by_id["p1"]["turns"] == 2
-        assert by_id["p1"]["cost"] == 3.0
-        assert by_id["p2"]["turns"] == 1
-
-    def test_newest_first(self):
-        groups = group_by_prompt(self._entries())
-        assert groups[0]["prompt_id"] == "p1"
-        assert groups[1]["prompt_id"] == "p2"
-
-    def test_tool_list_aggregates(self):
-        groups = group_by_prompt(self._entries())
-        by_id = {g["prompt_id"]: g for g in groups}
-        assert set(by_id["p1"]["tools"]) == {"Read", "Edit"}
-
-    def test_spawn_count_increments(self):
-        entries = self._entries()
-        entries.append((
-            datetime.now(), "spawn:abc",
-            {"source": "agent_spawn", "promptId": "p1",
-             "subagentType": "Explore"},
-        ))
-        groups = group_by_prompt(entries)
-        by_id = {g["prompt_id"]: g for g in groups}
-        assert by_id["p1"]["spawn_count"] == 1
-
-    def test_orphan_entries(self):
-        """Entries without promptId each become their own group."""
-        now = datetime.now()
-        entries = [
-            (now, "cc:o1", {
-                "source": "cc", "cost": 1.0, "session": "s1",
-                "tokensIn": 0, "tokensOut": 0,
-                "cacheReads": 0, "cacheWrites": 0,
-                "tools": [], "stopReason": "end_turn",
-            }),
-            (now - timedelta(seconds=1), "cc:o2", {
-                "source": "cc", "cost": 2.0, "session": "s1",
-                "tokensIn": 0, "tokensOut": 0,
-                "cacheReads": 0, "cacheWrites": 0,
-                "tools": [], "stopReason": "end_turn",
-            }),
-        ]
-        groups = group_by_prompt(entries)
-        assert len(groups) == 2
 
 
 # ── subagent_cost_rollup ──────────────────────────────────────────────────

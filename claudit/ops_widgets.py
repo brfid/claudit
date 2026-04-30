@@ -103,7 +103,7 @@ class HourlyBar(Horizontal):
             raise ValueError(f"HourlyBar expects 24 values, got {len(values)}")
         self._values = values
 
-    def _cell_markup(self, hour: int, v: float, mx: float) -> str:
+    def _cell_markup(self, v: float, mx: float) -> str:
         if v <= 0:
             glyph, color = self.EMPTY_GLYPH, self.EMPTY_COLOR
         else:
@@ -117,7 +117,7 @@ class HourlyBar(Horizontal):
             classes = "hourly-cell"
             if hour % 6 == 0 and hour != 0:
                 classes += " hourly-cell-mark"
-            yield Static(self._cell_markup(hour, v, mx),
+            yield Static(self._cell_markup(v, mx),
                          classes=classes, markup=True)
 
     def update_values(self, values: List[float]) -> None:
@@ -127,8 +127,8 @@ class HourlyBar(Horizontal):
         self._values = values
         mx = max(values) if any(values) else 1.0
         cells = list(self.query(Static))
-        for hour, (cell, v) in enumerate(zip(cells, values)):
-            cell.update(self._cell_markup(hour, v, mx))
+        for cell, v in zip(cells, values):
+            cell.update(self._cell_markup(v, mx))
 
 
 # ── Interactive log row ───────────────────────────────────────────────────

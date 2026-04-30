@@ -1,5 +1,6 @@
 """LCARS-themed TUI dashboard for claudit."""
 
+import contextlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -363,19 +364,15 @@ class CostTrackerApp(App):
         if self._current_tab == "OPS" and self._ops_entries_cache:
             self._set_selected_row(0)
         else:
-            try:
+            with contextlib.suppress(Exception):
                 self.query_one("#main-content", VerticalScroll).scroll_home(animate=False)
-            except Exception:
-                pass
 
     def action_jump_bottom(self) -> None:
         if self._current_tab == "OPS" and self._ops_entries_cache:
             self._set_selected_row(min(100, len(self._ops_entries_cache)) - 1)
         else:
-            try:
+            with contextlib.suppress(Exception):
                 self.query_one("#main-content", VerticalScroll).scroll_end(animate=False)
-            except Exception:
-                pass
 
     def action_show_help(self) -> None:
         self.push_screen(HelpScreen())
@@ -427,10 +424,8 @@ class CostTrackerApp(App):
                 rows[idx].update(text)
                 rows[idx].set_classes(row_class)
         if 0 <= new_idx < len(rows):
-            try:
+            with contextlib.suppress(Exception):
                 rows[new_idx].scroll_visible(animate=False)
-            except Exception:
-                pass
 
     def action_expand_selected(self) -> None:
         """Show modal with full prompt + metadata for the selected entry.
@@ -554,7 +549,7 @@ class CostTrackerApp(App):
         """
         plot = PlotextPlot()
 
-        def on_mount_chart(event=None):
+        def on_mount_chart():
             plt = self._init_plt(plot)
             draw_fn(plt)
             plot.refresh()
@@ -829,7 +824,7 @@ class CostTrackerApp(App):
         with percentile markers inline.
         """
         costs = []
-        for dt, entry in _iter_individual_entries(self._ledger, self._source_filter):
+        for _dt, entry in _iter_individual_entries(self._ledger, self._source_filter):
             c = entry.get(FIELD_COST, 0)
             if c > 0:
                 costs.append(c)

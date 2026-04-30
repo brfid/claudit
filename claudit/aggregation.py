@@ -106,8 +106,7 @@ def format_output(daily_data: Dict[str, Dict], limit_days: Optional[int] = None,
     lines.append("")
     lines.append(format_table_header())
 
-    for day in sorted_days:
-        lines.append(format_table_row(day, daily_data[day]))
+    lines.extend(format_table_row(day, daily_data[day]) for day in sorted_days)
 
     lines.append("")
     totals = calculate_totals({day: daily_data[day] for day in sorted_days})
