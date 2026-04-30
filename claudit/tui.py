@@ -50,6 +50,7 @@ from .ops_widgets import (
     LiveHourlyBar,
     LiveLabel,
     LiveStatBox,
+    LiveStatic,
     LogRow,
 )
 
@@ -243,7 +244,14 @@ class CostTrackerApp(App):
         yield self._metrics
 
         with Horizontal(id="top-bar"):
-            yield Static(datetime.now().strftime("%m·%d"), id="top-elbow")
+            # Stardate-flavored timestamp: month · ISO-week · day-of-month.
+            # Bound to the snapshot so it rolls over with the clock.
+            yield LiveStatic(
+                self._metrics,
+                lambda s: s.clock.now.strftime("%m·%V·%d"),
+                placeholder=datetime.now().strftime("%m·%V·%d"),
+                id="top-elbow",
+            )
             yield Static("CLAUDIT", id="top-title")
             yield Static("", id="top-bar-line")
 
