@@ -117,6 +117,11 @@ Examples:
         help='if last ingest was more than H hours ago, auto-promote to '
              'deep rescan (default: 24)'
     )
+    parser.add_argument(
+        '--force', action='store_true',
+        help='override the single-instance lock and launch the TUI even '
+             'if another claudit TUI appears to be running'
+    )
     return parser.parse_args()
 
 
@@ -225,13 +230,19 @@ def main():
         except ImportError:
             print("TUI requires: pip install 'claudit[tui]'")
             return 1
-        app = CostTrackerApp(
-            ledger_path_override=args.ledger_path,
-            source_filter=args.source,
-            no_ingest=args.cached,
-            force_ingest=args.rescan,
-        )
-        app.run()
+        from claudit.pidfile import AlreadyRunning, single_instance
+        try:
+            with single_instance(force=args.force):
+                app = CostTrackerApp(
+                    ledger_path_override=args.ledger_path,
+                    source_filter=args.source,
+                    no_ingest=args.cached,
+                    force_ingest=args.rescan,
+                )
+                app.run()
+        except AlreadyRunning as exc:
+            print(str(exc))
+            return 1
         return 0
 
     added = run_ingest(ledger_path, ledger, source=args.source,
