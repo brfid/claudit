@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from claudit.aggregation import aggregate_by_day, compute_date_window
-from claudit.collectors import (
+from llmcars.aggregation import aggregate_by_day, compute_date_window
+from llmcars.collectors import (
     _extract_user_text,
     _project_from_session_path,
     parse_claude_code_session,
 )
-from claudit.ledger import (
+from llmcars.ledger import (
     file_needs_processing,
     ingest,
     load_ingest_state,
@@ -22,7 +22,7 @@ from claudit.ledger import (
     save_ledger,
     update_file_state,
 )
-from claudit.pricing import (
+from llmcars.pricing import (
     HAIKU_PRICING,
     OPUS_PRICING,
     SONNET_PRICING,
@@ -366,8 +366,11 @@ class TestModelPricing:
         assert get_model_pricing("claude-haiku-future") is HAIKU_PRICING
 
     def test_unknown_falls_back_to_default(self):
-        # Non-Anthropic model name falls back to default (currently sonnet)
-        result = get_model_pricing("gpt-4")
+        # A string with no recognizable family falls back to DEFAULT (Sonnet).
+        # Recognized-but-unpriced families (gpt-4, nova, llama) return None
+        # under the new None-as-unpriced semantics — exercised in
+        # test_multi_model.
+        result = get_model_pricing("completely-made-up-model-name")
         assert result is SONNET_PRICING  # current DEFAULT
 
     def test_none_model(self):
@@ -487,8 +490,8 @@ class TestProjectFromSessionPath:
         session_file = slug_dir / "abc.jsonl"
         session_file.write_text("")
 
-        monkeypatch.setattr("claudit.collectors.get_claude_code_dir", lambda: fake_cc)
-        monkeypatch.setattr("claudit.collectors.Path.home", lambda: fake_home)
+        monkeypatch.setattr("llmcars.collectors.get_claude_code_dir", lambda: fake_cc)
+        monkeypatch.setattr("llmcars.collectors.Path.home", lambda: fake_home)
 
         result = _project_from_session_path(session_file)
         # Should resolve to the real target

@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .aggregation import aggregate_by_day, compute_date_window, entry_local_dt, format_output
-from .formatters import SOURCE_MAP
+from .formatters import (
+    SOURCE_CLI_CHOICES,
+    SOURCE_DISPLAY,
+    SOURCE_MAP,
+    resolve_source_cli,
+)
 from .ledger import (
     backup_dir,
     get_ingest_state_path,
@@ -19,30 +24,24 @@ from .ledger import (
 from .pipeline import run_ingest
 
 
-def _source_alias(value: str) -> str:
-    """Normalize source argument, accepting 'cc' as alias for 'claude-code'."""
-    aliases = {'cc': 'claude-code'}
-    return aliases.get(value, value)
-
-
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description='Track AI coding assistant costs (Cline + Claude Code).',
+        description='Track LLM API spend across Cline and Claude Code.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  claudit                       # Interactive dashboard (default)
-  claudit --report              # Text report, last 30 active days
-  claudit --report --days 7     # Last 7 active days
-  claudit --report --all        # All days with activity
-  claudit --source cline        # Dashboard, Cline only
-  claudit --source claude-code  # Dashboard, Claude Code only
-  claudit --cached              # Skip scanning live sources
-  claudit --rescan              # Rescan all files from scratch
-  claudit --deep                # Re-parse every file (dedups; data-safe)
-  claudit --stats               # Print ledger stats and exit
-  claudit --recalc --dry-run    # Preview cost correction without writing
-  claudit --recalc              # Rewrite ledger costs using current rates
+  llmcars                       # Interactive dashboard (default)
+  llmcars --report              # Text report, last 30 active days
+  llmcars --report --days 7     # Last 7 active days
+  llmcars --report --all        # All days with activity
+  llmcars --source cline        # Dashboard, Cline only
+  llmcars --source claude-code  # Dashboard, Claude Code only
+  llmcars --cached              # Skip scanning live sources
+  llmcars --rescan              # Rescan all files from scratch
+  llmcars --deep                # Re-parse every file (dedups; data-safe)
+  llmcars --stats               # Print ledger stats and exit
+  llmcars --recalc --dry-run    # Preview cost correction without writing
+  llmcars --recalc              # Rewrite ledger costs using current rates
         """
     )
     mode = parser.add_mutually_exclusive_group()
@@ -67,8 +66,8 @@ Examples:
         help='show all days with activity (overrides --days)'
     )
     parser.add_argument(
-        '--source', type=_source_alias,
-        choices=['all', 'cline', 'claude-code'], default='all',
+        '--source', type=resolve_source_cli,
+        choices=SOURCE_CLI_CHOICES, default='all',
         help='data source (default: all)'
     )
     parser.add_argument(
@@ -120,7 +119,7 @@ Examples:
     parser.add_argument(
         '--force', action='store_true',
         help='override the single-instance lock and launch the TUI even '
-             'if another claudit TUI appears to be running'
+             'if another llmcars TUI appears to be running'
     )
     return parser.parse_args()
 
@@ -210,9 +209,14 @@ def main():
 
     if args.recalc:
         dry = args.dry_run
-        old, new, changed = recalc_ledger_costs(ledger_path, ledger, dry_run=dry)
+        old, new, changed, skipped = recalc_ledger_costs(
+            ledger_path, ledger, dry_run=dry,
+        )
         label = "[dry run] " if dry else ""
         print(f"{label}Entries changed: {changed:,}")
+        if skipped:
+            print(f"{label}Entries skipped: {skipped:,} (model has no "
+                  f"configured pricing; cost preserved)")
         print(f"{label}Old total: ${old:,.2f}")
         print(f"{label}New total: ${new:,.2f}")
         print(f"{label}Difference: ${new - old:,.2f}")
@@ -226,11 +230,11 @@ def main():
 
     if not args.report:
         try:
-            from claudit.tui import CostTrackerApp
+            from llmcars.tui import CostTrackerApp
         except ImportError:
-            print("TUI requires: pip install 'claudit[tui]'")
+            print("TUI requires: pip install 'llmcars[tui]'")
             return 1
-        from claudit.pidfile import AlreadyRunning, single_instance
+        from llmcars.pidfile import AlreadyRunning, single_instance
         try:
             with single_instance(force=args.force):
                 app = CostTrackerApp(
@@ -268,8 +272,7 @@ def main():
         if source_filter is None or src == source_filter:
             sources_in_data.add(src)
 
-    source_labels = {'cc': 'Claude Code', 'cline': 'Cline'}
-    title_parts = [source_labels.get(s, s) for s in sorted(sources_in_data)]
+    title_parts = [SOURCE_DISPLAY.get(s, s) for s in sorted(sources_in_data)]
     title = (" + ".join(title_parts) + " " if title_parts else "") + "Daily Cost Summary"
 
     if not args.quiet:

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 
-from claudit.ops_data import (
+from llmcars.ops_data import (
     TOOL_ABBREV,
     aggregate_today,
     collect_entries,
@@ -34,7 +34,9 @@ class TestShortModel:
         assert short_model(None) == "—"
 
     def test_unknown(self):
-        assert short_model("gpt-4") == "gpt"
+        # gpt-4 is a recognized family now; truly unknown IDs return their
+        # first dash-segment.
+        assert short_model("xyz-42") == "xyz"
 
     def test_empty(self):
         assert short_model("") == "—"

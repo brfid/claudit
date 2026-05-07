@@ -18,6 +18,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
+from .formatters import cache_dir
+
 
 class AlreadyRunning(RuntimeError):
     """Raised when another instance holds the lock."""
@@ -27,16 +29,14 @@ class AlreadyRunning(RuntimeError):
         self.path = path
         who = f"PID {pid}" if pid else "another process"
         super().__init__(
-            f"claudit TUI is already running ({who}, lock at {path}). "
+            f"llmcars TUI is already running ({who}, lock at {path}). "
             f"Use --force to override."
         )
 
 
 def default_pidfile_path() -> Path:
-    """Return ``~/.cache/claudit/tui.pid`` (honors ``XDG_CACHE_HOME``)."""
-    cache_home = os.environ.get("XDG_CACHE_HOME")
-    base = Path(cache_home) if cache_home else Path.home() / ".cache"
-    return base / "claudit" / "tui.pid"
+    """Return the pidfile path under ``$XDG_CACHE_HOME/llmcars/``."""
+    return cache_dir() / "tui.pid"
 
 
 def _read_pid(path: Path) -> Optional[int]:

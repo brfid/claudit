@@ -1,4 +1,4 @@
-"""LCARS-themed TUI dashboard for claudit."""
+"""LLMCARS — LCARS-style TUI dashboard for llmcars."""
 
 import contextlib
 from datetime import datetime, timedelta
@@ -133,8 +133,8 @@ _STOP_COLORS = {
 
 
 class CostTrackerApp(App):
-    CSS_PATH = Path(__file__).resolve().parent / "lcars.tcss"
-    TITLE = "CLAUDIT"
+    CSS_PATH = Path(__file__).resolve().parent / "llmcars.tcss"
+    TITLE = "LLMCARS"
     REFRESH_INTERVAL = 30
     NEW_ROW_HIGHLIGHT_TICKS = 2
     BINDINGS = [
@@ -253,7 +253,7 @@ class CostTrackerApp(App):
                 placeholder=datetime.now().strftime("%m·%V·%d"),
                 id="top-elbow",
             )
-            yield Static("CLAUDIT", id="top-title")
+            yield Static("LLMCARS", id="top-title")
             yield Static("", id="top-bar-line")
 
         with Horizontal():

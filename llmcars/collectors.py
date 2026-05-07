@@ -85,20 +85,28 @@ def parse_ui_messages(task_dir: Path, verbose: bool = False) -> Tuple[List[Dict]
         return [], False
 
 
-def _normalize_cline_model(model_id: Optional[str]) -> Optional[str]:
-    """Strip bedrock/vertex regional prefixes so `short_model` recognizes it.
+# Bedrock/Vertex model IDs include a regional prefix and a provider prefix
+# before the family name. Strip both so `short_model` / `family_for_model`
+# see the raw family token.
+#
+# Examples:
+#   us.anthropic.claude-opus-4-7           → claude-opus-4-7
+#   global.anthropic.claude-sonnet-4-5-1   → claude-sonnet-4-5-1
+#   us.openai.gpt-5-5                      → gpt-5-5
+#   us.amazon.nova-pro-v1                  → nova-pro-v1
+#   us.meta.llama-4-70b                    → llama-4-70b
+_CLINE_REGION_RE = re.compile(r'^(us|global|eu|apac|apne|apse)\.')
+_CLINE_PROVIDER_RE = re.compile(
+    r'^(anthropic|openai|amazon|meta|mistral|cohere|ai21|google|deepseek)\.'
+)
 
-    Examples:
-      us.anthropic.claude-opus-4-7  → claude-opus-4-7
-      global.anthropic.claude-sonnet-4-5 → claude-sonnet-4-5
-      anthropic.claude-opus-4       → claude-opus-4
-    """
+
+def _normalize_cline_model(model_id: Optional[str]) -> Optional[str]:
+    """Strip Bedrock/Vertex regional + provider prefixes."""
     if not model_id:
         return model_id
-    # Drop region prefix like `us.` / `global.` / `eu.` / `apac.`
-    stripped = re.sub(r'^(us|global|eu|apac|apne|apse)\.', '', model_id)
-    # Drop provider prefix
-    stripped = re.sub(r'^anthropic\.', '', stripped)
+    stripped = _CLINE_REGION_RE.sub('', model_id)
+    stripped = _CLINE_PROVIDER_RE.sub('', stripped)
     return stripped or model_id
 
 

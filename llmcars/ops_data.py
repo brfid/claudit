@@ -19,15 +19,14 @@ from .formatters import (
     FIELD_TOKENS_IN,
     FIELD_TOKENS_OUT,
 )
+from .pricing import FAMILIES, FAMILIES_BY_KEY, family_for_model
 
-# Ordered (prefix, short) mapping for model-name shortening
-_MODEL_FAMILIES = ("opus", "sonnet", "haiku")
+# Single source of truth: model family → color. Built from the pricing
+# registry so new families are picked up automatically.
+MODEL_COLORS: Dict[str, str] = {fam.key: fam.color for fam in FAMILIES}
 
-MODEL_COLORS = {
-    "opus": "#FF9900",
-    "sonnet": "#9999CC",
-    "haiku": "#CC6699",
-}
+# Default color for families we don't yet recognize at all.
+_UNKNOWN_MODEL_COLOR = "#CC9966"
 
 # Short display codes for common Claude Code tool names
 TOOL_ABBREV = {
@@ -147,34 +146,85 @@ def subagent_cost_rollup(entries: List[Tuple]) -> Dict[str, float]:
 
 # ── Display-string helpers ────────────────────────────────────────────────
 
+def _extract_version_suffix(tail: str) -> str:
+    """Pick out leading ``.``-joined numbers in a model-ID tail.
+
+    e.g. ``"4-5-20250929"`` → ``"4.5"`` (drops the date stamp).
+    Returns ``""`` if no leading digit group is present.
+    """
+    nums: List[str] = []
+    for part in tail.split("-"):
+        if part.isdigit() and len(part) < 4:
+            nums.append(part)
+        else:
+            break
+    return ".".join(nums)
+
+
 def short_model(model: Optional[str]) -> str:
     """Shorten a full model ID to family-version form.
 
-    claude-opus-4-6               → opus-4.6
-    claude-sonnet-4-5-20250929    → sonnet-4.5
-    claude-haiku-4-5-20251001     → haiku-4.5
+    Anthropic:
+      claude-opus-4-6            → opus-4.6
+      claude-sonnet-4-5-20250929 → sonnet-4.5
+
+    OpenAI / others:
+      gpt-5-5                    → gpt-5.5
+      gpt-5-nano                 → gpt-5-nano
+      openai.gpt-5-mini          → gpt-5-mini (after normalization upstream)
+      us.amazon.nova-pro-v1      → nova (family only; version parsing is best-effort)
+
+    Unrecognized IDs fall back to the first dash-segment.
     """
     if not model:
         return "—"
-    for family in _MODEL_FAMILIES:
-        prefix = f"claude-{family}-"
-        if not model.startswith(prefix):
-            continue
-        tail = model[len(prefix):]
-        nums = []
-        for part in tail.split("-"):
-            if part.isdigit() and len(part) < 4:
-                nums.append(part)
-            else:
-                break
-        return f"{family}-{'.'.join(nums)}" if nums else family
-    return model.split("-")[0] if "-" in model else model
+    fam = family_for_model(model)
+    if fam is None:
+        return model.split("-", 1)[0] if "-" in model else model
+
+    # For the GPT-5 sub-families (nano/mini), the key already includes the
+    # qualifier — don't strip it, just return as-is.
+    if fam.key in ("gpt-5-nano", "gpt-5-mini"):
+        return fam.key
+
+    # For claude-*, we prefer the dot-joined version suffix.
+    if fam.key in ("opus", "sonnet", "haiku"):
+        prefix = f"claude-{fam.key}-"
+        if model.startswith(prefix):
+            ver = _extract_version_suffix(model[len(prefix):])
+            return f"{fam.key}-{ver}" if ver else fam.key
+        return fam.key
+
+    # For gpt-5/gpt-4/etc, try to extract a trailing version too.
+    # e.g. "gpt-5-5" → "gpt-5.5"; "gpt-5" alone → "gpt-5".
+    token = fam.tokens[0]
+    idx = model.lower().find(token)
+    if idx >= 0:
+        tail = model[idx + len(token):].lstrip("-")
+        ver = _extract_version_suffix(tail)
+        return f"{fam.key}.{ver}" if ver else fam.key
+    return fam.key
 
 
 def model_color(short: str) -> str:
-    """Return the LCARS hex color for a shortened model name's family."""
-    family = short.split("-", 1)[0]
-    return MODEL_COLORS.get(family, "#CC9966")
+    """Return the LLMCARS hex color for a shortened model name's family.
+
+    Accepts either a full short name (``gpt-5.5``) or a bare family key
+    (``gpt-5``). Falls back to ``_UNKNOWN_MODEL_COLOR`` for unknown families.
+    """
+    # Try progressively shorter prefixes so "gpt-5-nano" matches "gpt-5-nano"
+    # before falling back to "gpt-5".
+    if short in MODEL_COLORS:
+        return MODEL_COLORS[short]
+    # Drop the last dotted/dashed segment and retry (e.g. "gpt-5.5" → "gpt-5")
+    for sep in (".", "-"):
+        if sep in short:
+            head = short.rsplit(sep, 1)[0]
+            if head in MODEL_COLORS:
+                return MODEL_COLORS[head]
+    # Final fallback: first hyphen-separated segment
+    head = short.split("-", 1)[0]
+    return MODEL_COLORS.get(head, _UNKNOWN_MODEL_COLOR)
 
 
 def short_project(project: str) -> str:

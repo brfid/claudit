@@ -2,7 +2,7 @@
 
 ## Problem
 
-Claudit only scans `~/.claude/projects/`. Tools that run Claude Code with an isolated `HOME` (build-trials, other sandboxed harnesses) write session JSONLs under a scratch tree like `.../runs/<trial>/_scratch_home/.claude/projects/`. That spend is invisible to claudit today.
+llmcars only scans `~/.claude/projects/`. Tools that run Claude Code with an isolated `HOME` (build-trials, other sandboxed harnesses) write session JSONLs under a scratch tree like `.../runs/<trial>/_scratch_home/.claude/projects/`. That spend is invisible to llmcars today.
 
 Separately, trials run through AWS Bedrock rather than the Anthropic direct API. Token counts in the JSONL are correct; dollar cost computed from Anthropic rates is not.
 
@@ -41,7 +41,7 @@ Existing entries back-fill to `scanRoot=~/.claude`, `scope=user`, `costPath=anth
 
 ### Optional config
 
-`~/.local/share/claudit/scan_config.json` for overrides:
+`~/.local/share/llmcars/scan_config.json` for overrides:
 
 ```json
 {
@@ -57,7 +57,7 @@ Rules applied in order, first match wins. `~/.claude` is always included and alw
 
 ### Reports
 
-Default `claudit --report` groups totals by `costPath`:
+Default `llmcars --report` groups totals by `costPath`:
 
 ```
 Anthropic (direct):  $42.18
@@ -69,7 +69,7 @@ New filter: `--cost-path anthropic|bedrock|unknown`. `--stats` shows per-scan-ro
 
 ## Key property
 
-No coupling: sandboxed tools never import or configure claudit. Claudit finds their data by walking. Build-trials happens to write under `_scratch_home/.claude/` because the SDK honors `HOME`; claudit just notices.
+No coupling: sandboxed tools never import or configure llmcars. llmcars finds their data by walking. Build-trials happens to write under `_scratch_home/.claude/` because the SDK honors `HOME`; llmcars just notices.
 
 ## Risks
 

@@ -1,4 +1,4 @@
-"""Textual widgets used by the claudit OPS dashboard.
+"""Textual widgets used by the llmcars OPS dashboard.
 
 These are generic, stateless presentation components. They know how to render
 themselves given data; they do not know about the ledger, aggregation, or the

@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claudit"
-version = "0.1.0"
-description = "Claude API spend tracker for Claude Code and Cline"
+name = "llmcars"
+version = "0.2.0"
+description = "LLM API spend tracker for Claude Code and Cline (LCARS-style TUI)"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
@@ -15,14 +15,14 @@ dependencies = [
 ]
 
 [project.scripts]
-claudit = "claudit.cli:main"
+llmcars = "llmcars.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["claudit*"]
+include = ["llmcars*"]
 
 [tool.setuptools.package-data]
-claudit = ["*.tcss"]
+llmcars = ["*.tcss"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

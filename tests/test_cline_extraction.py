@@ -9,7 +9,7 @@ system prompt's working-directory hint.
 import json
 from unittest.mock import patch
 
-from claudit.collectors import (
+from llmcars.collectors import (
     _cline_stop_reason,
     _cline_tool_chain,
     _extract_cline_prompt_preview,
@@ -93,16 +93,16 @@ class TestExtractClinePromptPreview:
 
 class TestProjectFromCwd:
     def test_under_home(self, tmp_path):
-        with patch("claudit.collectors.Path.home", lambda: tmp_path):
+        with patch("llmcars.collectors.Path.home", lambda: tmp_path):
             assert _project_from_cwd(str(tmp_path / "src" / "proj")) == \
                 "~/src/proj"
 
     def test_exact_home(self, tmp_path):
-        with patch("claudit.collectors.Path.home", lambda: tmp_path):
+        with patch("llmcars.collectors.Path.home", lambda: tmp_path):
             assert _project_from_cwd(str(tmp_path)) == "~"
 
     def test_outside_home(self, tmp_path):
-        with patch("claudit.collectors.Path.home", lambda: tmp_path):
+        with patch("llmcars.collectors.Path.home", lambda: tmp_path):
             assert _project_from_cwd("/var/log") == "/var/log"
 
     def test_empty(self):
@@ -334,7 +334,7 @@ class TestProjectForClineTask:
             "</environment_details>"
         )
         msgs = [_api_req(1778000000000, request=req)]
-        with patch("claudit.collectors.Path.home", lambda: tmp_path):
+        with patch("llmcars.collectors.Path.home", lambda: tmp_path):
             # Same dir as home → "~"
             assert _project_for_cline_task(msgs) == "~"
 

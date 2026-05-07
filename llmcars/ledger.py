@@ -21,6 +21,7 @@ from .formatters import (
     FIELD_COST,
     FIELD_TOKENS_IN,
     FIELD_TOKENS_OUT,
+    data_dir,
 )
 from .ingest_state import (  # noqa: F401 — re-exported for back-compat
     file_needs_processing,
@@ -42,9 +43,7 @@ BACKUP_RETAIN = 7
 def get_ledger_path(override: Optional[str] = None) -> Path:
     if override:
         return Path(override)
-    data_dir = Path.home() / ".local" / "share" / "claudit"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir / "ledger.json"
+    return data_dir() / "ledger.json"
 
 
 def load_ledger(path: Path) -> Dict[str, Dict]:
@@ -113,12 +112,15 @@ def ingest(ledger: Dict[str, Dict], new_entries: Dict[str, Dict]) -> int:
 
 
 def recalc_ledger_costs(ledger_path: Path, ledger: Dict[str, Dict],
-                        dry_run: bool = False) -> Tuple[float, float, int]:
+                        dry_run: bool = False
+                        ) -> Tuple[float, float, int, int]:
     """Recompute ``cost`` and ``cacheSavings`` for every entry using current rates.
 
     Writes the ledger to disk when any values change, unless ``dry_run`` is
     true. Entries with no token data (e.g. synthetic agent-spawn entries)
-    are left alone.
+    are left alone. Entries whose model has no configured pricing (returns
+    ``None`` from ``calculate_cost``) are preserved as-is — we don't
+    reprice a GPT-class entry with Sonnet rates.
 
     Args:
       ledger_path: Path used when writing the updated ledger.
@@ -126,11 +128,13 @@ def recalc_ledger_costs(ledger_path: Path, ledger: Dict[str, Dict],
       dry_run: If true, skip the write.
 
     Returns:
-      ``(old_total, new_total, entries_changed)``.
+      ``(old_total, new_total, entries_changed, entries_skipped)``. Skipped
+      counts entries that had tokens + a model but no available rates.
     """
     old_total = 0.0
     new_total = 0.0
     changed = 0
+    skipped = 0
 
     for entry in ledger.values():
         ti = entry.get(FIELD_TOKENS_IN, 0)
@@ -147,13 +151,21 @@ def recalc_ledger_costs(ledger_path: Path, ledger: Dict[str, Dict],
             continue
 
         # Rescued/imported entries may lack a model field. Without it,
-        # calculate_cost silently falls back to Sonnet pricing, which would
-        # clobber correctly-priced historical costs. Skip them.
+        # we'd silently fall back to Sonnet pricing and clobber correctly
+        # priced historical costs. Skip them.
         if not model:
             new_total += old_cost
             continue
 
         new_cost = calculate_cost(ti, to, cw, cr, model)
+        if new_cost is None:
+            # Family known, rates not configured (placeholder). Preserve
+            # whatever cost the collector stored — for Cline that's the
+            # provider-reported cost; for CC it's the last-known rate.
+            new_total += old_cost
+            skipped += 1
+            continue
+
         new_savings = calculate_cache_savings(cr, model)
         new_total += new_cost
 
@@ -166,4 +178,4 @@ def recalc_ledger_costs(ledger_path: Path, ledger: Dict[str, Dict],
     if not dry_run and changed > 0:
         save_ledger(ledger_path, ledger)
 
-    return old_total, new_total, changed
+    return old_total, new_total, changed, skipped

@@ -9,7 +9,7 @@ Gap-triggered deep rescan: if more than `max_gap_hours` have passed since
 the last successful ingest, per-file incremental offsets are discarded and
 every discoverable session file is re-parsed from byte zero. Dedup by
 msg_id in `ledger.ingest()` makes this safe. This is the safety net against
-Claude Code's session cleanup — as long as you run claudit at least once
+Claude Code's session cleanup — as long as you run llmcars at least once
 per CC retention window, nothing is lost.
 """
 

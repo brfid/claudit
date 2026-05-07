@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from claudit.ledger import (
+from llmcars.ledger import (
     BACKUP_RETAIN,
     backup_dir,
     hours_since_last_ingest,
@@ -19,7 +19,7 @@ from claudit.ledger import (
     save_ledger,
     stamp_ingest,
 )
-from claudit.pipeline import DEFAULT_MAX_GAP_HOURS, run_ingest
+from llmcars.pipeline import DEFAULT_MAX_GAP_HOURS, run_ingest
 
 
 @pytest.fixture
@@ -114,8 +114,8 @@ class TestGapDetection:
         save_ledger(ledger_path, {})
         ledger = {}
 
-        with patch("claudit.pipeline.collect_cline_data", return_value={}), \
-             patch("claudit.pipeline.collect_claude_code_data", return_value={}):
+        with patch("llmcars.pipeline.collect_cline_data", return_value={}), \
+             patch("llmcars.pipeline.collect_claude_code_data", return_value={}):
             run_ingest(ledger_path, ledger, source="all", quiet=False)
 
         captured = capsys.readouterr()
@@ -133,8 +133,8 @@ class TestGapDetection:
             "_version": 1, "files": {}, "last_ingest_at": recent,
         })
 
-        with patch("claudit.pipeline.collect_cline_data", return_value={}), \
-             patch("claudit.pipeline.collect_claude_code_data", return_value={}):
+        with patch("llmcars.pipeline.collect_cline_data", return_value={}), \
+             patch("llmcars.pipeline.collect_claude_code_data", return_value={}):
             run_ingest(ledger_path, ledger, source="all", quiet=False)
 
         captured = capsys.readouterr()
@@ -153,8 +153,8 @@ class TestGapDetection:
             "last_ingest_at": stale,
         })
 
-        with patch("claudit.pipeline.collect_cline_data", return_value={}) as cline, \
-             patch("claudit.pipeline.collect_claude_code_data", return_value={}) as cc:
+        with patch("llmcars.pipeline.collect_cline_data", return_value={}) as cline, \
+             patch("llmcars.pipeline.collect_claude_code_data", return_value={}) as cc:
             run_ingest(ledger_path, ledger, source="all", quiet=False,
                        max_gap_hours=24.0)
 
@@ -177,8 +177,8 @@ class TestGapDetection:
             "last_ingest_at": (datetime.now() - timedelta(hours=2)).isoformat(),
         })
 
-        with patch("claudit.pipeline.collect_cline_data", return_value={}), \
-             patch("claudit.pipeline.collect_claude_code_data", return_value={}):
+        with patch("llmcars.pipeline.collect_cline_data", return_value={}), \
+             patch("llmcars.pipeline.collect_claude_code_data", return_value={}):
             # 1-hour threshold: 2h gap should trigger
             run_ingest(ledger_path, ledger, source="all", quiet=False,
                        max_gap_hours=1.0)
@@ -197,8 +197,8 @@ class TestGapDetection:
             "last_ingest_at": datetime.now().isoformat(),
         })
 
-        with patch("claudit.pipeline.collect_cline_data", return_value={}), \
-             patch("claudit.pipeline.collect_claude_code_data", return_value={}):
+        with patch("llmcars.pipeline.collect_cline_data", return_value={}), \
+             patch("llmcars.pipeline.collect_claude_code_data", return_value={}):
             run_ingest(ledger_path, ledger, source="all", quiet=False,
                        deep=True)
 
@@ -212,8 +212,8 @@ class TestBackupIntegration:
         save_ledger(ledger_path, {"pre": {"cost": 1.0}})
         ledger = {"pre": {"cost": 1.0}}
 
-        with patch("claudit.pipeline.collect_cline_data", return_value={}), \
-             patch("claudit.pipeline.collect_claude_code_data", return_value={}):
+        with patch("llmcars.pipeline.collect_cline_data", return_value={}), \
+             patch("llmcars.pipeline.collect_claude_code_data", return_value={}):
             run_ingest(ledger_path, ledger, source="all", quiet=True)
 
         today = datetime.now().strftime("%Y-%m-%d")
@@ -234,8 +234,8 @@ class TestTimestampPersisted:
         save_ledger(ledger_path, {})
         ledger = {}
 
-        with patch("claudit.pipeline.collect_cline_data", return_value={}), \
-             patch("claudit.pipeline.collect_claude_code_data", return_value={}):
+        with patch("llmcars.pipeline.collect_cline_data", return_value={}), \
+             patch("llmcars.pipeline.collect_claude_code_data", return_value={}):
             run_ingest(ledger_path, ledger, source="all", quiet=True)
 
         state = load_ingest_state(ledger_path.parent / "ingest_state.json")
