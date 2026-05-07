@@ -3,6 +3,7 @@
 import functools
 import json
 import platform
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,29 @@ from .formatters import (
 )
 from .ingest_state import file_needs_processing, get_stored_user_text, update_file_state
 from .pricing import calculate_cache_savings, calculate_cost
+
+
+# ---------------------------------------------------------------------------
+# Cline tool-name normalization
+# ---------------------------------------------------------------------------
+#
+# Cline records tool usage as `say: "tool"` messages whose `text` is a JSON
+# blob with a `tool` field. The vocabulary differs from Claude Code's, so we
+# map each Cline tool name to the CC equivalent. That way `TOOL_ABBREV` in
+# ops_data lights up the same glyphs regardless of source.
+
+_CLINE_TOOL_MAP = {
+    "readFile": "Read",
+    "editedExistingFile": "Edit",
+    "newFileCreated": "Write",
+    "searchFiles": "Grep",
+    "listFilesTopLevel": "LS",
+    "listFilesRecursive": "LS",
+    "listCodeDefinitionNames": "Glob",
+    "webFetch": "WebFetch",
+    # Browser / MCP names are already close; leave as-is.
+}
+
 
 
 # ---------------------------------------------------------------------------
@@ -61,34 +85,218 @@ def parse_ui_messages(task_dir: Path, verbose: bool = False) -> Tuple[List[Dict]
         return [], False
 
 
-def extract_cline_entries(messages: List[Dict], task_dir_name: str) -> Dict[str, Dict]:
-    """Extract keyed cost entries from Cline UI messages."""
-    entries = {}
-    for msg in messages:
-        if msg.get('say') != 'api_req_started':
+def _normalize_cline_model(model_id: Optional[str]) -> Optional[str]:
+    """Strip bedrock/vertex regional prefixes so `short_model` recognizes it.
+
+    Examples:
+      us.anthropic.claude-opus-4-7  → claude-opus-4-7
+      global.anthropic.claude-sonnet-4-5 → claude-sonnet-4-5
+      anthropic.claude-opus-4       → claude-opus-4
+    """
+    if not model_id:
+        return model_id
+    # Drop region prefix like `us.` / `global.` / `eu.` / `apac.`
+    stripped = re.sub(r'^(us|global|eu|apac|apne|apse)\.', '', model_id)
+    # Drop provider prefix
+    stripped = re.sub(r'^anthropic\.', '', stripped)
+    return stripped or model_id
+
+
+# Matches the first <task>…</task> block emitted by Cline's system prompt
+# template. Multiple paragraphs and newlines allowed inside.
+_CLINE_TASK_RE = re.compile(r'<task>\n?(.*?)</task>', re.DOTALL)
+# Cline wraps resumed-task prompts in <user_message>…</user_message>
+_CLINE_USER_MSG_RE = re.compile(r'<user_message>\n?(.*?)</user_message>', re.DOTALL)
+# Matches the working-directory line emitted in <environment_details>
+_CLINE_CWD_RE = re.compile(r'Current Working Directory \(([^)]+)\)')
+
+
+def _extract_cline_prompt_preview(request: str) -> str:
+    """Pull a human-readable preview out of a Cline api_req `request` field.
+
+    Priority:
+      1. <user_message>…</user_message> (resumed tasks, follow-ups)
+      2. <task>…</task> (first turn of a new task)
+      3. First non-tag, non-empty line of the request
+
+    The result is truncated to 80 chars and has whitespace collapsed so
+    it renders cleanly in the OPS log.
+    """
+    if not request:
+        return ""
+
+    for pattern in (_CLINE_USER_MSG_RE, _CLINE_TASK_RE):
+        match = pattern.search(request)
+        if match:
+            text = match.group(1).strip()
+            if text:
+                return " ".join(text.split())[:80]
+
+    # Fallback: first line that doesn't look like a tool or tag
+    for line in request.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('<') or stripped.startswith('['):
             continue
+        return " ".join(stripped.split())[:80]
+    return ""
+
+
+def _project_from_cwd(cwd: str) -> str:
+    """Format an absolute working directory as a short path (`~/foo/bar`)."""
+    if not cwd:
+        return ""
+    home = str(Path.home())
+    if cwd == home:
+        return "~"
+    if cwd.startswith(home + "/"):
+        return "~" + cwd[len(home):]
+    return cwd
+
+
+def _cline_stop_reason(post_msgs: List[Dict]) -> Optional[str]:
+    """Infer a stop-reason label from messages following an api_req_started.
+
+    Returns a short string from {"end_turn", "tool_use", "max_tokens",
+    "pause", None}. Scans until the next api_req_started.
+    """
+    for m in post_msgs:
+        if m.get('say') == 'api_req_started':
+            break
+        if m.get('say') in ('tool', 'command', 'browser_action_launch',
+                            'use_mcp_server'):
+            return 'tool_use'
+        if m.get('ask') in ('tool', 'command', 'browser_action_launch',
+                            'use_mcp_server'):
+            return 'tool_use'
+        if m.get('say') == 'completion_result' or m.get('ask') == 'completion_result':
+            return 'end_turn'
+        if m.get('ask') == 'plan_mode_respond' or m.get('say') == 'plan_mode_respond':
+            return 'end_turn'
+    return None
+
+
+def _cline_tool_chain(post_msgs: List[Dict]) -> List[str]:
+    """Collect tool names used between one api_req_started and the next.
+
+    Maps Cline's vocabulary to CC-equivalent names so downstream display
+    code (TOOL_ABBREV) renders the same glyphs regardless of source.
+    """
+    tools: List[str] = []
+    for m in post_msgs:
+        if m.get('say') == 'api_req_started':
+            break
+        if m.get('say') == 'command' or m.get('ask') == 'command':
+            tools.append('Bash')
+            continue
+        if m.get('say') == 'browser_action_launch':
+            tools.append('WebFetch')
+            continue
+        if m.get('say') == 'use_mcp_server' or m.get('ask') == 'use_mcp_server':
+            tools.append('Tool')  # generic
+            continue
+        if m.get('say') != 'tool' and m.get('ask') != 'tool':
+            continue
+        try:
+            payload = json.loads(m.get('text') or '{}')
+        except (json.JSONDecodeError, TypeError):
+            continue
+        raw = payload.get('tool') or ''
+        if not raw:
+            continue
+        tools.append(_CLINE_TOOL_MAP.get(raw, raw))
+    return tools
+
+
+def extract_cline_entries(messages: List[Dict], task_dir_name: str,
+                          project: str = "") -> Dict[str, Dict]:
+    """Extract keyed cost entries from Cline UI messages.
+
+    Populates `model`, `project`, `session`, `promptPreview`, `tools`, and
+    `stopReason` alongside the cost/token fields so the OPS tab can surface
+    Cline activity the same way it does Claude Code.
+    """
+    entries: Dict[str, Dict] = {}
+    api_indexes = [i for i, m in enumerate(messages)
+                   if m.get('say') == 'api_req_started']
+
+    for pos, i in enumerate(api_indexes):
+        msg = messages[i]
         try:
             ts = msg.get('ts')
             if not ts:
                 continue
             dt = datetime.fromtimestamp(ts / 1000.0)
-            text_data = json.loads(msg.get('text', '{}'))
+            text_data = json.loads(msg.get('text') or '{}')
             cache_reads = text_data.get(FIELD_CACHE_READS, 0)
 
+            # --- model ---
+            model_info = msg.get('modelInfo') or {}
+            model = _normalize_cline_model(model_info.get('modelId'))
+
+            # --- prompt preview (from the `request` blob on this api_req) ---
+            preview = _extract_cline_prompt_preview(text_data.get('request') or '')
+
+            # --- tools + stop reason: scan messages up to the NEXT api_req ---
+            end = api_indexes[pos + 1] if pos + 1 < len(api_indexes) else len(messages)
+            post = messages[i + 1:end]
+            tools = _cline_tool_chain(post)
+            stop_reason = _cline_stop_reason(post)
+            # If this is the last api_req in the task and nothing follows,
+            # treat as a completed turn so it lands in the "end_turn" bucket.
+            if stop_reason is None and pos == len(api_indexes) - 1:
+                stop_reason = 'end_turn'
+
             entry_id = f"cline:{task_dir_name}:{int(ts)}"
-            entries[entry_id] = {
+            entry: Dict = {
                 'source': 'cline',
                 'ts': dt.isoformat(),
+                'session': task_dir_name,
+                'isSubagent': False,
                 FIELD_TOKENS_IN: text_data.get(FIELD_TOKENS_IN, 0),
                 FIELD_TOKENS_OUT: text_data.get(FIELD_TOKENS_OUT, 0),
                 FIELD_CACHE_WRITES: text_data.get(FIELD_CACHE_WRITES, 0),
                 FIELD_CACHE_READS: cache_reads,
                 FIELD_COST: text_data.get(FIELD_COST, 0.0),
-                FIELD_CACHE_SAVINGS: calculate_cache_savings(cache_reads),
+                FIELD_CACHE_SAVINGS: calculate_cache_savings(cache_reads, model),
             }
+            if model:
+                entry['model'] = model
+            if project:
+                entry['project'] = project
+            if preview:
+                entry['promptPreview'] = preview
+            if tools:
+                entry['tools'] = tools
+            if stop_reason:
+                entry['stopReason'] = stop_reason
+
+            entries[entry_id] = entry
         except (json.JSONDecodeError, ValueError, KeyError):
             continue
     return entries
+
+
+
+def _project_for_cline_task(messages: List[Dict]) -> str:
+    """Find the task's working directory by peeking at the first api_req.
+
+    Cline's system prompt template embeds a `Current Working Directory (…)`
+    line inside `<environment_details>`; we pull it out of the first
+    `api_req_started.request` blob and normalize it to `~/…` form.
+    """
+    for m in messages:
+        if m.get('say') != 'api_req_started':
+            continue
+        try:
+            text_data = json.loads(m.get('text') or '{}')
+        except (json.JSONDecodeError, TypeError):
+            continue
+        req = text_data.get('request') or ''
+        cwd_match = _CLINE_CWD_RE.search(req)
+        if cwd_match:
+            return _project_from_cwd(cwd_match.group(1).strip())
+        return ""
+    return ""
 
 
 def collect_cline_data(verbose: bool,
@@ -123,7 +331,10 @@ def collect_cline_data(verbose: bool,
             ok += 1
         else:
             fail += 1
-        all_entries.update(extract_cline_entries(messages, task_dir.name))
+        project = _project_for_cline_task(messages)
+        all_entries.update(
+            extract_cline_entries(messages, task_dir.name, project=project)
+        )
 
         if ingest_state is not None and ui_file.exists():
             try:
@@ -131,6 +342,7 @@ def collect_cline_data(verbose: bool,
                 update_file_state(ingest_state, ui_file, stat.st_size)
             except OSError:
                 pass
+
 
     if verbose:
         print(f"Cline: parsed {ok}/{len(task_dirs)} tasks ({skipped} skipped), "
