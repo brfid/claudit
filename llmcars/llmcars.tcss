@@ -236,6 +236,19 @@ Sparkline > .sparkline--min-color {
     background: #000000;
 }
 
+/* Two-panel stack used by the TOKENS tab: split top/bottom evenly so
+   neither sub-chart starves. Each child .chart-panel keeps its own
+   plotext sizing rules above. */
+.chart-stack {
+    layout: vertical;
+    height: 1fr;
+}
+
+.chart-stack > .chart-panel {
+    height: 1fr;
+    min-height: 14;
+}
+
 .chart-title {
     dock: top;
     height: 1;

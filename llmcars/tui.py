@@ -639,33 +639,67 @@ class CostTrackerApp(App):
         )
         return self._make_chart("DAILY COST ($)", draw, subtitle)
 
-    # ── Tokens chart ──
+    # ── Tokens charts ──
+    #
+    # Cache reads typically dwarf input/output by 10–500×, so a single shared
+    # axis crushes the I/O bars to invisibility. Split into two stacked
+    # panels with independent scales: top shows generated traffic (input +
+    # output), bottom shows cache traffic (writes + reads). Each subtitle
+    # carries the totals so quick comparisons don't require eyeballing the
+    # axis.
 
     def _build_tokens_chart(self) -> Widget:
         sorted_days = sorted(self._daily.keys())[-30:]
+        if not sorted_days:
+            return self._chart_panel("No token data", Label(""))
+
+        labels = [d[5:] for d in sorted_days]
         tokens_in = [self._daily[d][FIELD_TOKENS_IN] for d in sorted_days]
         tokens_out = [self._daily[d][FIELD_TOKENS_OUT] for d in sorted_days]
         cache_w = [self._daily[d][FIELD_CACHE_WRITES] for d in sorted_days]
         cache_r = [self._daily[d][FIELD_CACHE_READS] for d in sorted_days]
 
-        def draw(plt):
-            labels = [d[5:] for d in sorted_days]
+        def _fmt_tok(v):
+            return format_tokens(int(v), compact=True)
+
+        def draw_io(plt):
             plt.multiple_bar(
                 labels,
-                [tokens_in, tokens_out, cache_w, cache_r],
-                labels=["Input", "Output", "Cache Write", "Cache Read"],
-                color=[
-                    (255, 153, 0),
-                    (204, 102, 153),
-                    (153, 153, 204),
-                    (204, 153, 204),
-                ],
+                [tokens_in, tokens_out],
+                labels=["Input", "Output"],
+                color=[(255, 153, 0), (204, 102, 153)],
             )
-            all_tokens = tokens_in + tokens_out + cache_w + cache_r
-            self._set_yticks(plt, all_tokens,
-                             lambda v: format_tokens(int(v), compact=True))
+            self._set_yticks(plt, tokens_in + tokens_out, _fmt_tok)
 
-        return self._make_chart("TOKEN USAGE BY DAY", draw)
+        def draw_cache(plt):
+            plt.multiple_bar(
+                labels,
+                [cache_w, cache_r],
+                labels=["Cache Write", "Cache Read"],
+                color=[(153, 153, 204), (204, 153, 204)],
+            )
+            self._set_yticks(plt, cache_w + cache_r, _fmt_tok)
+
+        io_subtitle = (
+            f"30d totals  ◥  "
+            f"In: {format_tokens(sum(tokens_in))}  ◥  "
+            f"Out: {format_tokens(sum(tokens_out))}"
+        )
+        cache_subtitle = (
+            f"30d totals  ◥  "
+            f"Writes: {format_tokens(sum(cache_w))}  ◥  "
+            f"Reads: {format_tokens(sum(cache_r))}"
+        )
+
+        io_panel = self._make_chart(
+            "GENERATED TOKENS — INPUT & OUTPUT (30d)",
+            draw_io, io_subtitle,
+        )
+        cache_panel = self._make_chart(
+            "CACHE TOKENS — WRITES & READS (30d)",
+            draw_cache, cache_subtitle,
+        )
+        return Vertical(io_panel, cache_panel, classes="chart-panel chart-stack")
 
     # ── Cache chart ──
 
