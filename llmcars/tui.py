@@ -46,6 +46,7 @@ from .live_metrics import LiveMetrics, MetricsSnapshot, compute_snapshot
 from .ops_widgets import (
     EntryDetailScreen,
     FluidBar,
+    HeatmapGrid,
     HelpScreen,
     LiveBorderSubtitle,
     LiveHourlyBar,
@@ -83,38 +84,9 @@ def aggregate_hourly_cost_heatmap(ledger: Dict, source_filter: Optional[str] = N
     return grid
 
 
-# ── Heatmap (plotext matrix) ──
+# ── Heatmap day-axis labels ──
 
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-# Background color for zero cells — dim gray so empty days are visible on dark bg
-_HEATMAP_ZERO = (30, 30, 30)
-
-
-def _grid_to_rgb(grid: List[List[float]],
-                 color_zero: tuple = _HEATMAP_ZERO,
-                 color_low: tuple = (0, 80, 0),
-                 color_high: tuple = (0, 255, 100)) -> List[List[tuple]]:
-    """Convert a float grid to RGB tuples for matrix_plot.
-
-    Zero cells get color_zero; non-zero cells are interpolated between
-    color_low and color_high based on their fraction of the grid max.
-    """
-    max_val = max((v for row in grid for v in row), default=0.0)
-    rgb_grid = []
-    for row in grid:
-        rgb_row = []
-        for v in row:
-            if v == 0.0 or max_val == 0.0:
-                rgb_row.append(color_zero)
-            else:
-                t = v / max_val
-                r = int(color_low[0] + t * (color_high[0] - color_low[0]))
-                g = int(color_low[1] + t * (color_high[1] - color_low[1]))
-                b = int(color_low[2] + t * (color_high[2] - color_low[2]))
-                rgb_row.append((r, g, b))
-        rgb_grid.append(rgb_row)
-    return rgb_grid
 
 
 # ── Main app ──
@@ -734,7 +706,7 @@ class CostTrackerApp(App):
 
     def _build_activity(self) -> Widget:
         reqs_by_date = {d: self._daily[d][FIELD_REQUESTS] for d in self._daily}
-        grid, month_ticks, month_labels, grid_start, grid_end = self._build_weeks_grid(
+        grid, month_ticks, month_labels, *_ = self._build_weeks_grid(
             {d: float(v) for d, v in reqs_by_date.items()}
         )
 
@@ -743,20 +715,22 @@ class CostTrackerApp(App):
         peak_day = max(reqs_by_date, key=reqs_by_date.get) if reqs_by_date else None
         peak_count = reqs_by_date[peak_day] if peak_day else 0
 
-        def draw(plt):
-            plt.matrix_plot(_grid_to_rgb(list(reversed(grid))))
-            plt.yticks(list(range(7)), list(reversed(DAY_NAMES)))
-            if month_ticks:
-                plt.xticks(month_ticks, month_labels)
-            plt.title("Requests per day")
+        x_labels = list(zip(month_ticks, month_labels)) if month_ticks else []
+        heatmap = HeatmapGrid(
+            grid,
+            y_labels=DAY_NAMES,
+            x_labels=x_labels,
+            color_low=(40, 30, 70),
+            color_high=(180, 180, 240),
+        )
 
         subtitle = (
             f"{active_days} active days  ◥  "
             f"Total: {total_requests:,}  ◥  "
             f"Peak: {peak_day[5:] if peak_day else '—'} ({peak_count:,})"
         )
-        return self._make_chart(
-            "ACTIVITY HEATMAP — REQUESTS (40 weeks)", draw, subtitle,
+        return self._chart_panel(
+            "ACTIVITY HEATMAP — REQUESTS (40 weeks)", heatmap, subtitle,
         )
 
     # ── Calendar heatmap (GitHub-style) ──
@@ -796,12 +770,14 @@ class CostTrackerApp(App):
         total_cost = sum(cost_by_date.values())
         max_cost = max(cost_by_date.values()) if cost_by_date else 0
 
-        def draw(plt):
-            plt.matrix_plot(_grid_to_rgb(list(reversed(grid))))
-            plt.yticks(list(range(7)), list(reversed(DAY_NAMES)))
-            if month_ticks:
-                plt.xticks(month_ticks, month_labels)
-            plt.title("Daily cost intensity")
+        x_labels = list(zip(month_ticks, month_labels)) if month_ticks else []
+        heatmap = HeatmapGrid(
+            grid,
+            y_labels=DAY_NAMES,
+            x_labels=x_labels,
+            color_low=(60, 30, 0),
+            color_high=(255, 153, 0),
+        )
 
         subtitle = (
             f"{grid_start.strftime('%Y-%m-%d')} → "
@@ -810,8 +786,8 @@ class CostTrackerApp(App):
             f"Total: {format_cost(total_cost)}  ◥  "
             f"Peak: {format_cost(max_cost)}"
         )
-        return self._make_chart(
-            "CALENDAR HEATMAP — DAILY COST (40 weeks)", draw, subtitle,
+        return self._chart_panel(
+            "CALENDAR HEATMAP — DAILY COST (40 weeks)", heatmap, subtitle,
         )
 
     # ── Spend heatmap (cost by hour × day-of-week) ──
@@ -829,21 +805,18 @@ class CostTrackerApp(App):
         else:
             peak_label = "—"
 
-        def draw(plt):
-            plt.matrix_plot(_grid_to_rgb(
-                list(reversed(grid)),
-                color_low=(80, 30, 0),
-                color_high=(255, 140, 0),
-            ))
-            plt.yticks(list(range(7)), list(reversed(DAY_NAMES)))
-            plt.xticks(
-                [i for i in range(24) if i % 3 == 0],
-                [str(i) for i in range(24) if i % 3 == 0],
-            )
-            plt.title("Cost per hour ($)")
+        # Hour ticks every 3 hours so labels don't clobber each other
+        hour_ticks = [(h, f"{h:02d}") for h in range(24) if h % 3 == 0]
+        heatmap = HeatmapGrid(
+            grid,
+            y_labels=DAY_NAMES,
+            x_labels=hour_ticks,
+            color_low=(80, 30, 0),
+            color_high=(255, 140, 0),
+        )
 
-        return self._make_chart(
-            "SPEND HEATMAP — COST BY HOUR × DAY", draw,
+        return self._chart_panel(
+            "SPEND HEATMAP — COST BY HOUR × DAY", heatmap,
             f"Peak: {peak_label}  ◥  Total: {format_cost(total_cost)}",
         )
 

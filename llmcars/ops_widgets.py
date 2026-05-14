@@ -84,6 +84,145 @@ class FluidBar(_FluidBarBase):
         )
 
 
+# ── Heatmap grid ──────────────────────────────────────────────────────────
+
+class HeatmapGrid(Vertical):
+    """LCARS-styled 2D heatmap rendered with native Textual cells.
+
+    Plotext's matrix_plot draws one terminal column per cell, which leaves
+    a 40×7 calendar squinting in a corner of the panel. This widget instead
+    lays out cells as a grid of ``Static`` widgets with ``1fr`` widths so
+    they expand to fill the available horizontal space — every cell ends
+    up several columns wide and the heatmap reads at a glance.
+
+    Layout:
+      ┌─────────┬───────────────────────────────────────┐
+      │         │ x-tick labels (month names, hours, …) │
+      │ y-ticks │ row of 1fr cells per data row        │
+      │         │ row of 1fr cells per data row        │
+      │         │ …                                    │
+      └─────────┴───────────────────────────────────────┘
+
+    Parameters:
+      grid: ``rows × cols`` floats. Higher = more intense.
+      y_labels: One label per row (top-to-bottom).
+      x_labels: ``[(col_index, label), ...]`` for sparse x-axis ticks.
+      color_zero / color_low / color_high: RGB tuples for the colormap.
+      cell_height: Rows of terminal lines per data row (1 or 2).
+    """
+
+    DEFAULT_CSS = """
+    HeatmapGrid {
+        layout: vertical;
+        height: auto;
+        width: 100%;
+    }
+
+    HeatmapGrid .heatmap-row {
+        layout: horizontal;
+        width: 100%;
+    }
+
+    HeatmapGrid .heatmap-y-label {
+        width: 5;
+        height: 1;
+        color: #9999CC;
+        content-align: right middle;
+        padding: 0 1 0 0;
+    }
+
+    HeatmapGrid .heatmap-cell {
+        width: 1fr;
+        height: 1;
+        content-align: center middle;
+    }
+
+    HeatmapGrid .heatmap-x-axis {
+        layout: horizontal;
+        width: 100%;
+        height: 1;
+    }
+
+    HeatmapGrid .heatmap-x-label {
+        width: 1fr;
+        height: 1;
+        color: #9999CC;
+        content-align: left middle;
+    }
+    """
+
+    def __init__(
+        self,
+        grid: List[List[float]],
+        y_labels: List[str],
+        x_labels: Optional[List[tuple]] = None,
+        color_zero: tuple = (30, 30, 30),
+        color_low: tuple = (0, 80, 0),
+        color_high: tuple = (0, 255, 100),
+        cell_height: int = 1,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self._grid = grid
+        self._y_labels = y_labels
+        self._x_labels = x_labels or []
+        self._color_zero = color_zero
+        self._color_low = color_low
+        self._color_high = color_high
+        self._cell_height = max(1, cell_height)
+
+    @staticmethod
+    def _interp(low: tuple, high: tuple, t: float) -> str:
+        r = int(low[0] + t * (high[0] - low[0]))
+        g = int(low[1] + t * (high[1] - low[1]))
+        b = int(low[2] + t * (high[2] - low[2]))
+        return f"#{r:02X}{g:02X}{b:02X}"
+
+    def _cell_color(self, v: float, mx: float) -> str:
+        if mx == 0 or v == 0:
+            return f"#{self._color_zero[0]:02X}{self._color_zero[1]:02X}{self._color_zero[2]:02X}"
+        return self._interp(self._color_low, self._color_high, v / mx)
+
+    def compose(self) -> ComposeResult:
+        if not self._grid or not self._grid[0]:
+            return
+        cols = len(self._grid[0])
+        max_val = max((v for row in self._grid for v in row), default=0.0)
+
+        # X-axis tick row (sparse: empty labels for cols without ticks)
+        if self._x_labels:
+            tick_map = {c: lbl for c, lbl in self._x_labels}
+            x_cells = []
+            for c in range(cols):
+                lbl = tick_map.get(c, "")
+                x_cells.append(Static(
+                    f"[#9999CC]{lbl}[/]",
+                    classes="heatmap-x-label", markup=True,
+                ))
+            yield Horizontal(
+                # Spacer matching y-label width
+                Static("", classes="heatmap-y-label"),
+                *x_cells,
+                classes="heatmap-x-axis",
+            )
+
+        for r, row in enumerate(self._grid):
+            ylabel = self._y_labels[r] if r < len(self._y_labels) else ""
+            label_widget = Static(
+                f"[#9999CC]{ylabel}[/]",
+                classes="heatmap-y-label", markup=True,
+            )
+            cells: list[Widget] = [label_widget]
+            for v in row:
+                color = self._cell_color(v, max_val)
+                # Use solid block fill so the cell reads as a tile, not a glyph.
+                cells.append(Static(
+                    f"[{color}]████[/]",
+                    classes="heatmap-cell", markup=True,
+                ))
+            yield Horizontal(*cells, classes="heatmap-row")
+
+
 # ── Hourly activity bar ───────────────────────────────────────────────────
 
 class HourlyBar(Horizontal):
