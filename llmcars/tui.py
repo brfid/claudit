@@ -32,6 +32,8 @@ from .ledger import get_ledger_path, load_ledger
 from .pipeline import run_ingest
 from .ops_data import (
     LOG_ROW_CAP,
+    RECENT_BUCKET_MIN,
+    RECENT_WINDOW_HOURS,
     OpsView,
     RowSpec,
     build_row_specs,
@@ -57,7 +59,7 @@ from .ops_widgets import (
 )
 
 TABS = ["OVERVIEW", "DAILY", "CUMULATIVE", "CALENDAR", "TOKENS",
-        "CACHE", "REQUESTS", "COST MAP", "CALLS", "OPS"]
+        "CACHE", "REQUESTS", "COST MAP", "CALLS", "OPS", "RECENT"]
 
 
 # ── Helper: aggregate by hour-of-day × day-of-week ──
@@ -137,6 +139,7 @@ class CostTrackerApp(App):
         Binding("8", "tab('COST MAP')", "Cost Map", show=False),
         Binding("9", "tab('CALLS')", "Calls", show=False),
         Binding("0", "tab('OPS')", "Ops", show=False),
+        Binding("minus", "tab('RECENT')", "Recent", show=False),
     ]
 
     def __init__(self, ledger_path_override=None, source_filter="all",
@@ -291,10 +294,11 @@ class CostTrackerApp(App):
     # Tabs whose content is pure-chart (plotext/heatmap). These don't
     # subscribe to LiveMetrics reactively, so their tick-time refresh path
     # is a full `_render_tab` — but only when the underlying daily data
-    # (or hourly grid, for COST MAP) actually changed.
+    # (or hourly grid, for COST MAP) actually changed. RECENT is included
+    # because its 12h window slides with the clock, not the daily aggregate.
     _CHART_TABS = frozenset({
         "DAILY", "CUMULATIVE", "CALENDAR", "TOKENS", "CACHE",
-        "REQUESTS", "COST MAP", "CALLS",
+        "REQUESTS", "COST MAP", "CALLS", "RECENT",
     })
 
     def _auto_refresh_tick(self) -> None:
@@ -467,6 +471,7 @@ class CostTrackerApp(App):
             "COST MAP": self._build_spend_heatmap,
             "CALLS": self._build_cost_histogram,
             "OPS": self._build_ops,
+            "RECENT": self._build_recent,
         }
         container = self.query_one("#panel-container", Vertical)
         container.remove_children()
@@ -952,6 +957,184 @@ class CostTrackerApp(App):
             if cumulative else ""
         )
         return self._make_chart("CUMULATIVE COST", draw, subtitle)
+
+    # ── RECENT tab ──────────────────────────────────────────────────────
+    #
+    # OPS shows "today since midnight"; RECENT shows the rolling-12h window
+    # at 15-minute granularity. Three stacked bar charts (cost / requests /
+    # tokens) plus a stat row (1h / 6h / 12h totals) give a true "what just
+    # happened" lens that doesn't reset at midnight or wash out late at
+    # night.
+
+    def _build_recent(self) -> Widget:
+        snap = self._snapshot
+        if snap is None:
+            return Vertical(classes="chart-panel")
+        rv = snap.recent
+        now = snap.clock.now
+
+        # X-axis labels — show every 4 buckets (every hour) so labels read
+        # cleanly. Use HH:MM format.
+        bucket_labels = [
+            t.strftime("%H:%M") if i % 4 == 0 else ""
+            for i, t in enumerate(rv.bucket_starts)
+        ]
+
+        def draw_cost(plt):
+            plt.bar(bucket_labels, rv.cost_series, color=(255, 153, 0))
+            self._set_yticks(plt, rv.cost_series, format_cost)
+
+        def draw_reqs(plt):
+            plt.bar(bucket_labels, rv.request_series, color=(204, 102, 153))
+            self._set_yticks(
+                plt, [float(v) for v in rv.request_series],
+                lambda v: f"{int(v)}",
+            )
+
+        def draw_tokens(plt):
+            plt.bar(bucket_labels, rv.token_series, color=(153, 153, 204))
+            self._set_yticks(
+                plt, [float(v) for v in rv.token_series],
+                lambda v: format_tokens(int(v), compact=True),
+            )
+
+        # Stat-band row: 1h / 6h / 12h, plus most-recent activity timestamp.
+        if rv.last_call_dt is None:
+            last_label = "no recent calls"
+        else:
+            age = now - rv.last_call_dt
+            mins = int(age.total_seconds() // 60)
+            if mins < 1:
+                last_label = "just now"
+            elif mins < 60:
+                last_label = f"{mins}m ago"
+            else:
+                last_label = f"{mins // 60}h{mins % 60:02d}m ago"
+
+        stat_row = Horizontal(
+            self._build_recent_stat(
+                "LAST 1h", "",
+                value=format_cost(rv.cost_1h),
+                detail=f"{rv.requests_1h:,} requests",
+            ),
+            self._build_recent_stat(
+                "LAST 6h", "alt",
+                value=format_cost(rv.cost_6h),
+                detail=f"{rv.requests_6h:,} requests",
+            ),
+            self._build_recent_stat(
+                "LAST 12h", "accent",
+                value=format_cost(rv.cost_12h),
+                detail=f"{rv.requests_12h:,} requests · "
+                       f"{format_tokens(rv.tokens_12h)} tokens",
+            ),
+            self._build_recent_stat(
+                "LATEST", "",
+                value=last_label,
+                detail=(rv.last_call_dt.strftime("%H:%M:%S")
+                        if rv.last_call_dt else "—"),
+            ),
+            classes="ops-stat-row",
+        )
+
+        recent_summary = Vertical(
+            stat_row,
+            classes="ops-panel ops-panel-session",
+        )
+        recent_summary.border_title = "◖ RECENT ACTIVITY ◗"
+        recent_summary.border_subtitle = (
+            f"rolling {RECENT_WINDOW_HOURS}h window · "
+            f"{RECENT_BUCKET_MIN}-min buckets"
+        )
+
+        # Three stacked sub-charts.
+        cost_panel = self._make_chart(
+            f"COST PER {RECENT_BUCKET_MIN}-MIN BUCKET ($)",
+            draw_cost,
+            f"12h total: {format_cost(rv.cost_12h)}  ◥  "
+            f"peak: {format_cost(max(rv.cost_series, default=0))}",
+        )
+        req_panel = self._make_chart(
+            f"REQUESTS PER {RECENT_BUCKET_MIN}-MIN BUCKET",
+            draw_reqs,
+            f"12h total: {rv.requests_12h:,}  ◥  "
+            f"peak: {max(rv.request_series, default=0):,}",
+        )
+        tok_panel = self._make_chart(
+            f"TOKENS PER {RECENT_BUCKET_MIN}-MIN BUCKET",
+            draw_tokens,
+            f"12h total: {format_tokens(rv.tokens_12h)}  ◥  "
+            f"peak: {format_tokens(max(rv.token_series, default=0))}",
+        )
+
+        # Side-by-side ranking row: model mix + project mix in the window.
+        ranking_panels = self._build_recent_ranking_panels(rv)
+
+        children: List[Widget] = [recent_summary, cost_panel, req_panel, tok_panel]
+        if ranking_panels is not None:
+            children.append(ranking_panels)
+        return Vertical(*children, classes="chart-panel chart-stack")
+
+    def _build_recent_stat(self, label: str, accent: str,
+                           value: str, detail: str) -> Vertical:
+        """Static stat cell for the RECENT summary row.
+
+        Unlike the OPS cells, this isn't bound to LiveLabel — RECENT
+        rebuilds the whole tab on each tick (it's in `_CHART_TABS`), so a
+        plain string is fine and avoids re-subscribing 4 watchers per cell.
+        """
+        cls = "ops-stat-cell"
+        if accent:
+            cls += f" ops-stat-cell-{accent}"
+        return Vertical(
+            Label(f" [#9999CC]{label}[/]",
+                  classes="ops-stat-cell-label", markup=True),
+            Label(f" [#FF9900]{value}[/]",
+                  classes="ops-stat-cell-value", markup=True),
+            Label(f" [dim]{detail}[/]",
+                  classes="ops-stat-cell-detail", markup=True),
+            classes=cls,
+        )
+
+    def _build_recent_ranking_panels(self, rv) -> Optional[Widget]:
+        """Side-by-side MODEL / PROJECT cost panels for the 12h window."""
+        panels: list[Widget] = []
+        if rv.model_cost_12h:
+            top = sorted(
+                rv.model_cost_12h.items(), key=lambda x: x[1], reverse=True,
+            )[:TOP_N_PANEL]
+            max_v = max((c for _, c in top), default=1) or 1
+            rows = [
+                self._panel_row(
+                    m, format_cost(c), c / max_v if max_v else 0, model_color(m),
+                )
+                for m, c in top
+            ]
+            panels.append(self._ranked_panel(
+                "MODEL MIX (12h)",
+                f"{len(rv.model_cost_12h)} models · "
+                f"{format_cost(rv.cost_12h)} total",
+                rows,
+            ))
+        if rv.project_cost_12h:
+            top = sorted(
+                rv.project_cost_12h.items(), key=lambda x: x[1], reverse=True,
+            )[:TOP_N_PANEL]
+            max_v = max((c for _, c in top), default=1) or 1
+            rows = [
+                self._panel_row(
+                    p, format_cost(c), c / max_v if max_v else 0, "#FF9900",
+                )
+                for p, c in top
+            ]
+            panels.append(self._ranked_panel(
+                "PROJECTS (12h)",
+                f"{len(rv.project_cost_12h)} active",
+                rows,
+            ))
+        if not panels:
+            return None
+        return Horizontal(*panels, classes="ops-side-by-side")
 
     # ── OPS tab ──
 

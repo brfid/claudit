@@ -35,9 +35,11 @@ from .formatters import (
 )
 from .ops_data import (
     OpsView,
+    RecentView,
     aggregate_today,
     collect_entries,
     derive_ops_view,
+    derive_recent_view,
     short_model,
     short_project,
 )
@@ -191,6 +193,7 @@ class MetricsSnapshot:
     ledger_signature: Tuple            # (len, source_filter)
     overview: OverviewMetrics
     ops: OpsView
+    recent: RecentView                 # rolling 12h window for RECENT tab
     ops_entries: List                  # raw entries for OPS call-log rendering
     daily: Dict[str, Dict] = field(default_factory=dict)
     source_filter: Optional[str] = None
@@ -224,6 +227,9 @@ def compute_snapshot(ledger: Dict, daily: Dict[str, Dict],
     entries = collect_entries(ledger, source_filter)
     stats = aggregate_today(entries, short_project, short_model)
     ops = derive_ops_view(entries, stats, now=clock.now)
+    recent = derive_recent_view(
+        entries, short_project, short_model, now=clock.now,
+    )
     overview = _overview(daily, clock)
     return MetricsSnapshot(
         clock=clock,
@@ -231,6 +237,7 @@ def compute_snapshot(ledger: Dict, daily: Dict[str, Dict],
         ledger_signature=(len(ledger), source_filter or ""),
         overview=overview,
         ops=ops,
+        recent=recent,
         ops_entries=entries,
         daily=daily,
         source_filter=source_filter,

@@ -7,7 +7,7 @@ trivially testable and reusable across tabs.
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from .aggregation import entry_local_dt
@@ -511,4 +511,157 @@ def derive_ops_view(entries: List[Tuple], stats: Dict,
         p95_cost=percentile(costs, 0.95),
         max_call_cost=costs[-1] if costs else 0.0,
         hour_cost=hourly_cost_today(entries),
+    )
+
+
+# ── Rolling-window (RECENT) view ──────────────────────────────────────────
+#
+# OPS shows "today since midnight". At 1 AM that's nearly empty; at 11 PM
+# it's the whole working day. Neither answers "what's been happening
+# recently?" The RECENT view fills that gap with a true rolling-window
+# lens, bucketed fine enough to see bursts.
+
+# Bucket granularity (minutes) and total window size (hours). 15-min × 12h
+# gives 48 bars — enough resolution to see individual sessions without
+# requiring a wide terminal.
+RECENT_WINDOW_HOURS = 12
+RECENT_BUCKET_MIN = 15
+_RECENT_BUCKETS = (RECENT_WINDOW_HOURS * 60) // RECENT_BUCKET_MIN  # 48
+
+
+@dataclass(frozen=True)
+class RecentView:
+    """Numbers the RECENT tab displays.
+
+    All series are length-``_RECENT_BUCKETS`` (48), bucketed at
+    ``RECENT_BUCKET_MIN`` (15 min) granularity, oldest-first.
+
+    Cost is per bucket in dollars; requests are call counts; tokens are
+    in+out per bucket. Cumulative cost helps eyeballing the burn pace
+    independent of bucket spikiness.
+    """
+    cost_series: List[float]       # $ per 15-min bucket, length 48
+    request_series: List[int]      # calls per 15-min bucket
+    token_series: List[int]        # in+out tokens per 15-min bucket
+    cumulative_cost: List[float]   # running sum of cost_series
+    bucket_starts: List[datetime]  # start time per bucket (oldest-first)
+
+    cost_1h: float
+    cost_6h: float
+    cost_12h: float
+    requests_1h: int
+    requests_6h: int
+    requests_12h: int
+    tokens_12h: int
+
+    model_cost_12h: Dict[str, float]      # short_model → $ in window
+    project_cost_12h: Dict[str, float]    # short_project → $ in window
+    last_call_dt: Optional[datetime]      # most recent call in window
+
+
+def _bucket_index(dt: datetime, window_start: datetime) -> int:
+    """Map a timestamp to its bucket index, or -1 if out of window."""
+    delta = (dt - window_start).total_seconds() / 60.0
+    if delta < 0:
+        return -1
+    idx = int(delta // RECENT_BUCKET_MIN)
+    if idx >= _RECENT_BUCKETS:
+        return -1
+    return idx
+
+
+def derive_recent_view(entries: List[Tuple], short_project_fn,
+                       short_model_fn,
+                       now: Optional[datetime] = None) -> RecentView:
+    """Compute the rolling-window stats from a flat entry list.
+
+    Walks ``entries`` once; entries outside the 12h window are skipped.
+    Agent-spawn entries are ignored (consistent with the OPS tab — they
+    don't carry billable cost).
+    """
+    now = now or datetime.now()
+    # Window-end is rounded up to the next bucket boundary so the rightmost
+    # bucket always covers "right now"; window-start = end - 12h.
+    end_minute = (now.minute // RECENT_BUCKET_MIN + 1) * RECENT_BUCKET_MIN
+    if end_minute >= 60:
+        window_end = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    else:
+        window_end = now.replace(minute=end_minute, second=0, microsecond=0)
+    window_start = window_end - timedelta(hours=RECENT_WINDOW_HOURS)
+
+    cost_series = [0.0] * _RECENT_BUCKETS
+    request_series = [0] * _RECENT_BUCKETS
+    token_series = [0] * _RECENT_BUCKETS
+    bucket_starts = [
+        window_start + timedelta(minutes=i * RECENT_BUCKET_MIN)
+        for i in range(_RECENT_BUCKETS)
+    ]
+
+    cost_1h = cost_6h = cost_12h = 0.0
+    req_1h = req_6h = req_12h = 0
+    tokens_12h = 0
+    model_cost: Dict[str, float] = defaultdict(float)
+    project_cost: Dict[str, float] = defaultdict(float)
+    last_call_dt: Optional[datetime] = None
+
+    for dt, _, e in entries:
+        if e.get("source") == "agent_spawn":
+            continue
+        if dt < window_start:
+            # entries are newest-first; once we hit the wall we're done
+            break
+        idx = _bucket_index(dt, window_start)
+        if idx < 0:
+            continue
+
+        cost = e.get(FIELD_COST, 0) or 0.0
+        tokens = (e.get(FIELD_TOKENS_IN, 0) or 0) + (e.get(FIELD_TOKENS_OUT, 0) or 0)
+
+        cost_series[idx] += cost
+        request_series[idx] += 1
+        token_series[idx] += tokens
+
+        cost_12h += cost
+        req_12h += 1
+        tokens_12h += tokens
+
+        # Window-relative band counters
+        age_hrs = (now - dt).total_seconds() / 3600.0
+        if age_hrs <= 1.0:
+            cost_1h += cost
+            req_1h += 1
+        if age_hrs <= 6.0:
+            cost_6h += cost
+            req_6h += 1
+
+        sm = short_model_fn(e.get("model"))
+        model_cost[sm] += cost
+        sp = short_project_fn(e.get("project", ""))
+        project_cost[sp] += cost
+
+        if last_call_dt is None or dt > last_call_dt:
+            last_call_dt = dt
+
+    cumulative: List[float] = []
+    running = 0.0
+    for c in cost_series:
+        running += c
+        cumulative.append(running)
+
+    return RecentView(
+        cost_series=cost_series,
+        request_series=request_series,
+        token_series=token_series,
+        cumulative_cost=cumulative,
+        bucket_starts=bucket_starts,
+        cost_1h=cost_1h,
+        cost_6h=cost_6h,
+        cost_12h=cost_12h,
+        requests_1h=req_1h,
+        requests_6h=req_6h,
+        requests_12h=req_12h,
+        tokens_12h=tokens_12h,
+        model_cost_12h=dict(model_cost),
+        project_cost_12h=dict(project_cost),
+        last_call_dt=last_call_dt,
     )

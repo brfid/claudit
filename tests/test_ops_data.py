@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from llmcars.ops_data import (
     TOOL_ABBREV,
     aggregate_today,
@@ -398,3 +400,103 @@ class TestAggregateTodaySpawns:
         assert s["spawn_count"] == 3
         assert s["subagent_type_counts"]["Explore"] == 2
         assert s["subagent_type_counts"]["general-purpose"] == 1
+
+
+# ── derive_recent_view ────────────────────────────────────────────────────
+
+class TestDeriveRecentView:
+    """Rolling-window aggregator for the RECENT tab.
+
+    These cover the bucketing math (entries in/out of window, age-band
+    accumulators) and the structural invariants (series length, cumulative).
+    """
+
+    def _entries(self, now):
+        from datetime import timedelta
+        return [
+            # Newest-first, as collect_entries returns
+            (now - timedelta(minutes=10), "a", {
+                "source": "cc", "ts": (now - timedelta(minutes=10)).isoformat(),
+                "cost": 1.0, "tokensIn": 100, "tokensOut": 50,
+                "cacheSavings": 0, "model": "claude-opus-4-7",
+                "project": "/p", "isSubagent": False,
+            }),
+            (now - timedelta(hours=2), "b", {
+                "source": "cc", "ts": (now - timedelta(hours=2)).isoformat(),
+                "cost": 0.5, "tokensIn": 50, "tokensOut": 25,
+                "cacheSavings": 0, "model": "claude-sonnet-4-5",
+                "project": "/q", "isSubagent": False,
+            }),
+            (now - timedelta(hours=8), "c", {
+                "source": "cc", "ts": (now - timedelta(hours=8)).isoformat(),
+                "cost": 0.25, "tokensIn": 10, "tokensOut": 5,
+                "cacheSavings": 0, "model": "claude-opus-4-7",
+                "project": "/p", "isSubagent": False,
+            }),
+            # Outside the 12h window — should be ignored
+            (now - timedelta(hours=20), "d", {
+                "source": "cc", "ts": (now - timedelta(hours=20)).isoformat(),
+                "cost": 99.0, "tokensIn": 1, "tokensOut": 1,
+                "cacheSavings": 0, "model": "claude-opus-4-7",
+                "project": "/p", "isSubagent": False,
+            }),
+            # An agent_spawn that should be skipped entirely
+            (now - timedelta(minutes=5), "spawn:x", {
+                "source": "agent_spawn",
+                "ts": (now - timedelta(minutes=5)).isoformat(),
+                "subagentType": "Explore",
+                "cost": 0, "tokensIn": 0, "tokensOut": 0, "cacheSavings": 0,
+            }),
+        ]
+
+    def test_band_totals(self):
+        from datetime import datetime
+        from llmcars.ops_data import derive_recent_view, short_model, short_project
+        now = datetime(2026, 5, 13, 21, 30)
+        rv = derive_recent_view(self._entries(now), short_project, short_model, now=now)
+        # 1h band: only the 10-min-old entry
+        assert rv.cost_1h == pytest.approx(1.0)
+        assert rv.requests_1h == 1
+        # 6h band: 1h entry + 2h entry
+        assert rv.cost_6h == pytest.approx(1.5)
+        assert rv.requests_6h == 2
+        # 12h band: 1h + 2h + 8h entries (not the 20h-old one)
+        assert rv.cost_12h == pytest.approx(1.75)
+        assert rv.requests_12h == 3
+        assert rv.tokens_12h == 100 + 50 + 50 + 25 + 10 + 5
+
+    def test_series_shape(self):
+        from datetime import datetime
+        from llmcars.ops_data import (
+            derive_recent_view, short_model, short_project, _RECENT_BUCKETS,
+        )
+        now = datetime(2026, 5, 13, 21, 30)
+        rv = derive_recent_view(self._entries(now), short_project, short_model, now=now)
+        assert len(rv.cost_series) == _RECENT_BUCKETS
+        assert len(rv.request_series) == _RECENT_BUCKETS
+        assert len(rv.token_series) == _RECENT_BUCKETS
+        assert len(rv.bucket_starts) == _RECENT_BUCKETS
+        assert len(rv.cumulative_cost) == _RECENT_BUCKETS
+        # Cumulative is monotonic non-decreasing
+        for a, b in zip(rv.cumulative_cost, rv.cumulative_cost[1:]):
+            assert b >= a
+
+    def test_model_breakdown(self):
+        from datetime import datetime
+        from llmcars.ops_data import derive_recent_view, short_model, short_project
+        now = datetime(2026, 5, 13, 21, 30)
+        rv = derive_recent_view(self._entries(now), short_project, short_model, now=now)
+        # Two opus-4.7 calls in window: $1.00 + $0.25
+        assert rv.model_cost_12h["opus-4.7"] == pytest.approx(1.25)
+        # One sonnet call
+        assert "sonnet-4.5" in rv.model_cost_12h or "sonnet-4" in rv.model_cost_12h
+
+    def test_empty_entries(self):
+        from datetime import datetime
+        from llmcars.ops_data import derive_recent_view, short_model, short_project
+        now = datetime(2026, 5, 13, 21, 30)
+        rv = derive_recent_view([], short_project, short_model, now=now)
+        assert rv.cost_12h == 0
+        assert rv.requests_12h == 0
+        assert rv.last_call_dt is None
+        assert all(c == 0 for c in rv.cost_series)

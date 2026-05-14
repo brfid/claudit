@@ -133,20 +133,21 @@ Launch with `llmcars` (the default mode).
 
 ### Tabs
 
-Number keys `1`–`0` switch tabs:
+Number keys `1`–`0` switch tabs; `-` jumps to RECENT:
 
 | Key | Tab | Contents |
 |---|---|---|
 | `1` | OVERVIEW | Six stat boxes with sparklines (today, this week, 30-day, tokens, cache, burn rate) |
 | `2` | DAILY | Daily cost line chart |
 | `3` | CUMULATIVE | Running total cost |
-| `4` | CALENDAR | 40-week cost heatmap (GitHub-style) |
-| `5` | TOKENS | Input/output/cache bar chart |
+| `4` | CALENDAR | 40-week cost heatmap (GitHub-style, native cells) |
+| `5` | TOKENS | Two-panel chart: input/output (top), cache writes/reads (bottom) |
 | `6` | CACHE | Savings vs efficiency |
-| `7` | REQUESTS | 40-week activity heatmap |
-| `8` | COST MAP | Cost by hour × day-of-week |
+| `7` | REQUESTS | 40-week activity heatmap (native cells) |
+| `8` | COST MAP | Cost by hour × day-of-week (native cells) |
 | `9` | CALLS | Per-call cost distribution histogram |
 | `0` | OPS | Live session stats, project breakdown, model mix, call log |
+| `-` | RECENT | Rolling-12h window: cost / requests / tokens at 15-min granularity |
 
 ### OPS tab
 
