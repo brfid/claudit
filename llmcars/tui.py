@@ -58,8 +58,24 @@ from .ops_widgets import (
     LogRow,
 )
 
-TABS = ["OVERVIEW", "DAILY", "CUMULATIVE", "CALENDAR", "TOKENS",
-        "CACHE", "REQUESTS", "COST MAP", "CALLS", "OPS", "RECENT"]
+# Tab order: live → trends → patterns → distribution. Each block answers
+# one user question and groups visually similar charts. Bindings 1–9 stay
+# clean (no orphan letter keys for routine tabs).
+TABS = [
+    # Live: what's happening right now / today
+    "OVERVIEW",   # 1 — universal entry point, dense at-a-glance
+    "RECENT",     # 2 — rolling 12h, fine-grained
+    "OPS",        # 3 — today + call log
+    # Trends: how am I trending over weeks
+    "DAILY",      # 4 — daily cost line
+    "TOKENS",     # 5 — input/output + cache trends
+    "CACHE",      # 6 — savings vs efficiency
+    # Patterns: when do I work
+    "CALENDAR",   # 7 — daily heatmap (cost / requests, m toggles)
+    "COST MAP",   # 8 — hour × day-of-week
+    # Distribution
+    "CALLS",      # 9 — per-call cost histogram
+]
 
 
 # ── Helper: aggregate by hour-of-day × day-of-week ──
@@ -128,18 +144,22 @@ class CostTrackerApp(App):
         Binding("g", "jump_top", "Top", show=False),
         Binding("G", "jump_bottom", "Bottom", show=False),
         Binding("enter", "expand_selected", "Expand row", show=False),
-        # Number shortcuts
+        # Number shortcuts. Layout matches the TABS list above:
+        #   1 OVERVIEW    2 RECENT    3 OPS
+        #   4 DAILY       5 TOKENS    6 CACHE
+        #   7 CALENDAR    8 COST MAP  9 CALLS
         Binding("1", "tab('OVERVIEW')", "Overview", show=False),
-        Binding("2", "tab('DAILY')", "Daily", show=False),
-        Binding("3", "tab('CUMULATIVE')", "Cumulative", show=False),
-        Binding("4", "tab('CALENDAR')", "Calendar", show=False),
+        Binding("2", "tab('RECENT')", "Recent", show=False),
+        Binding("3", "tab('OPS')", "Ops", show=False),
+        Binding("4", "tab('DAILY')", "Daily", show=False),
         Binding("5", "tab('TOKENS')", "Tokens", show=False),
         Binding("6", "tab('CACHE')", "Cache", show=False),
-        Binding("7", "tab('REQUESTS')", "Requests", show=False),
+        Binding("7", "tab('CALENDAR')", "Calendar", show=False),
         Binding("8", "tab('COST MAP')", "Cost Map", show=False),
         Binding("9", "tab('CALLS')", "Calls", show=False),
-        Binding("0", "tab('OPS')", "Ops", show=False),
-        Binding("minus", "tab('RECENT')", "Recent", show=False),
+        # CALENDAR-only metric toggle (cost ↔ requests)
+        Binding("m", "toggle_calendar_metric", "Toggle metric",
+                show=False),
     ]
 
     def __init__(self, ledger_path_override=None, source_filter="all",
@@ -162,6 +182,10 @@ class CostTrackerApp(App):
         self._selected_row: int = -1
         # Per-row spec cache so selection moves don't rebuild labels
         self._ops_row_specs: List[RowSpec] = []
+        # CALENDAR tab can switch metric — "cost" (amber, $) or
+        # "requests" (periwinkle, count). Persists for the session so
+        # users don't have to re-toggle on every tab visit.
+        self._calendar_metric: str = "cost"
         # Reactive snapshot carrier — mounted in compose(); every live
         # widget subscribes to its `snapshot` attribute.
         self._metrics = LiveMetrics()
@@ -297,8 +321,8 @@ class CostTrackerApp(App):
     # (or hourly grid, for COST MAP) actually changed. RECENT is included
     # because its 12h window slides with the clock, not the daily aggregate.
     _CHART_TABS = frozenset({
-        "DAILY", "CUMULATIVE", "CALENDAR", "TOKENS", "CACHE",
-        "REQUESTS", "COST MAP", "CALLS", "RECENT",
+        "DAILY", "CALENDAR", "TOKENS", "CACHE",
+        "COST MAP", "CALLS", "RECENT",
     })
 
     def _auto_refresh_tick(self) -> None:
@@ -462,20 +486,31 @@ class CostTrackerApp(App):
         self._current_tab = tab_name
         builders = {
             "OVERVIEW": self._build_overview,
+            "RECENT": self._build_recent,
+            "OPS": self._build_ops,
             "DAILY": self._build_cost_chart,
-            "CUMULATIVE": self._build_cumulative_chart,
-            "CALENDAR": self._build_calendar_heatmap,
             "TOKENS": self._build_tokens_chart,
             "CACHE": self._build_cache_chart,
-            "REQUESTS": self._build_activity,
+            "CALENDAR": self._build_calendar_heatmap,
             "COST MAP": self._build_spend_heatmap,
             "CALLS": self._build_cost_histogram,
-            "OPS": self._build_ops,
-            "RECENT": self._build_recent,
         }
         container = self.query_one("#panel-container", Vertical)
         container.remove_children()
         container.mount(builders[tab_name]())
+
+    def action_toggle_calendar_metric(self) -> None:
+        """Cycle CALENDAR between cost ($) and requests (count).
+
+        No-op outside CALENDAR. The metric is sticky across tab switches
+        so users don't have to re-toggle every visit.
+        """
+        if self._current_tab != "CALENDAR":
+            return
+        self._calendar_metric = (
+            "requests" if self._calendar_metric == "cost" else "cost"
+        )
+        self._render_tab("CALENDAR")
 
     @staticmethod
     def _init_plt(plot: PlotextPlot):
@@ -707,40 +742,28 @@ class CostTrackerApp(App):
         )
         return self._make_chart("CACHE PERFORMANCE", draw, subtitle)
 
-    # ── Activity heatmap ──
-
-    def _build_activity(self) -> Widget:
-        reqs_by_date = {d: self._daily[d][FIELD_REQUESTS] for d in self._daily}
-        grid, month_ticks, month_labels, *_ = self._build_weeks_grid(
-            {d: float(v) for d, v in reqs_by_date.items()}
-        )
-
-        total_requests = sum(reqs_by_date.values())
-        active_days = sum(1 for v in reqs_by_date.values() if v > 0)
-        peak_day = max(reqs_by_date, key=reqs_by_date.get) if reqs_by_date else None
-        peak_count = reqs_by_date[peak_day] if peak_day else 0
-
-        x_labels = list(zip(month_ticks, month_labels)) if month_ticks else []
-        heatmap = HeatmapGrid(
-            grid,
-            y_labels=DAY_NAMES,
-            x_labels=x_labels,
-            color_low=(40, 30, 70),
-            color_high=(180, 180, 240),
-        )
-
-        subtitle = (
-            f"{active_days} active days  ◥  "
-            f"Total: {total_requests:,}  ◥  "
-            f"Peak: {peak_day[5:] if peak_day else '—'} ({peak_count:,})"
-        )
-        return self._chart_panel(
-            "ACTIVITY HEATMAP — REQUESTS (40 weeks)", heatmap, subtitle,
-        )
-
-    # ── Calendar heatmap (GitHub-style) ──
+    # ── Calendar heatmap (GitHub-style, with metric toggle) ──
+    #
+    # Originally CALENDAR (cost) and REQUESTS (count) were separate tabs
+    # despite identical layouts. They're now one tab with `m` to cycle
+    # metric. Cost stays amber so the default look is unchanged; requests
+    # render in periwinkle to match the rest of the app's "count" palette.
 
     CALENDAR_WEEKS = 40
+
+    # Metric → (title, color_low, color_high, value_formatter, peak_formatter)
+    _CALENDAR_METRICS = {
+        "cost": (
+            "CALENDAR HEATMAP — DAILY COST (40 weeks)",
+            (60, 30, 0), (255, 153, 0),
+            FIELD_COST, format_cost, "Total",
+        ),
+        "requests": (
+            "CALENDAR HEATMAP — DAILY REQUESTS (40 weeks)",
+            (40, 30, 70), (180, 180, 240),
+            FIELD_REQUESTS, lambda v: f"{int(v):,}", "Total",
+        ),
+    }
 
     @staticmethod
     def _build_weeks_grid(daily_values: Dict[str, float], num_weeks: int = CALENDAR_WEEKS):
@@ -768,32 +791,41 @@ class CostTrackerApp(App):
         return grid, month_ticks, month_labels, grid_start, grid_end
 
     def _build_calendar_heatmap(self) -> Widget:
-        cost_by_date = {d: self._daily[d][FIELD_COST] for d in self._daily}
-        grid, month_ticks, month_labels, grid_start, grid_end = self._build_weeks_grid(cost_by_date)
+        title, color_low, color_high, field, fmt, total_label = (
+            self._CALENDAR_METRICS[self._calendar_metric]
+        )
+        by_date = {d: float(self._daily[d][field]) for d in self._daily}
+        grid, month_ticks, month_labels, grid_start, grid_end = (
+            self._build_weeks_grid(by_date)
+        )
 
-        active_days = sum(1 for v in cost_by_date.values() if v > 0)
-        total_cost = sum(cost_by_date.values())
-        max_cost = max(cost_by_date.values()) if cost_by_date else 0
+        active_days = sum(1 for v in by_date.values() if v > 0)
+        total_v = sum(by_date.values())
+        max_v = max(by_date.values()) if by_date else 0
+        peak_day = max(by_date, key=by_date.get) if by_date else None
+        peak_v = by_date[peak_day] if peak_day else 0
 
         x_labels = list(zip(month_ticks, month_labels)) if month_ticks else []
         heatmap = HeatmapGrid(
             grid,
             y_labels=DAY_NAMES,
             x_labels=x_labels,
-            color_low=(60, 30, 0),
-            color_high=(255, 153, 0),
+            color_low=color_low,
+            color_high=color_high,
         )
 
+        # Metric-toggle hint lives in the subtitle so users can discover
+        # the feature. Bracketed key matches the keybinding convention.
+        other = "requests" if self._calendar_metric == "cost" else "cost"
         subtitle = (
             f"{grid_start.strftime('%Y-%m-%d')} → "
             f"{grid_end.strftime('%Y-%m-%d')}  ◥  "
             f"{active_days} active days  ◥  "
-            f"Total: {format_cost(total_cost)}  ◥  "
-            f"Peak: {format_cost(max_cost)}"
+            f"{total_label}: {fmt(total_v)}  ◥  "
+            f"Peak: {fmt(peak_v)}  ◥  "
+            f"[dim]\\[m] toggle to {other}[/]"
         )
-        return self._chart_panel(
-            "CALENDAR HEATMAP — DAILY COST (40 weeks)", heatmap, subtitle,
-        )
+        return self._chart_panel(title, heatmap, subtitle)
 
     # ── Spend heatmap (cost by hour × day-of-week) ──
 
@@ -934,30 +966,6 @@ class CostTrackerApp(App):
         panel.border_subtitle = "per API call"
         return Vertical(panel, classes="chart-panel")
 
-    # ── Cumulative cost chart ──
-
-    def _build_cumulative_chart(self) -> Widget:
-        sorted_days = sorted(self._daily.keys())
-        dates = list(range(len(sorted_days)))
-
-        cumulative = []
-        running = 0.0
-        for d in sorted_days:
-            running += self._daily[d][FIELD_COST]
-            cumulative.append(running)
-
-        def draw(plt):
-            plt.plot(dates, cumulative, marker="braille", color=(255, 153, 0))
-            self._set_date_xticks(plt, sorted_days, dates, max_ticks=8)
-            self._set_yticks(plt, cumulative, format_cost)
-
-        subtitle = (
-            f"{sorted_days[0]} → {sorted_days[-1]}  ◥  "
-            f"Total: {format_cost(cumulative[-1])}"
-            if cumulative else ""
-        )
-        return self._make_chart("CUMULATIVE COST", draw, subtitle)
-
     # ── RECENT tab ──────────────────────────────────────────────────────
     #
     # OPS shows "today since midnight"; RECENT shows the rolling-12h window
@@ -973,11 +981,15 @@ class CostTrackerApp(App):
         rv = snap.recent
         now = snap.clock.now
 
-        # X-axis labels — show every 4 buckets (every hour) so labels read
-        # cleanly. Use HH:MM format.
+        # X-axis labels — only label buckets that start exactly on the
+        # hour, regardless of which bucket index that lands on. Otherwise
+        # an out-of-phase window (e.g. 9:30 PM rounds end to 9:45) leaves
+        # ticks at :45 / :45 / :45 instead of :00 / :00 / :00. plotext
+        # treats empty-string slots as no-tick, so we render the full
+        # series and the axis stays clean.
         bucket_labels = [
-            t.strftime("%H:%M") if i % 4 == 0 else ""
-            for i, t in enumerate(rv.bucket_starts)
+            t.strftime("%H:%M") if t.minute == 0 else ""
+            for t in rv.bucket_starts
         ]
 
         def draw_cost(plt):

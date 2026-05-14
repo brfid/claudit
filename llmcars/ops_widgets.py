@@ -301,19 +301,23 @@ class HelpScreen(ModalScreen):
 
     _HELP_TEXT = """\
 [b]Navigation[/b]
-  [b]]  [/b] Next tab
-  [b][  [/b] Prev tab
-  [b]1–0[/b] Jump to tab directly
+  [b]] / [    [/b] Next / prev tab
+  [b]1–9      [/b] Jump direct: 1 OVERVIEW 2 RECENT 3 OPS
+              4 DAILY 5 TOKENS 6 CACHE
+              7 CALENDAR 8 COST MAP 9 CALLS
 
 [b]Scrolling[/b]
   [b]j / k    [/b] Down / up one row
   [b]J / K    [/b] Down / up 10 rows
-  [b]ctrl+d/u [/b] Page down / page up
+  [b]ctrl+d/u [/b] Page down / up
   [b]g / G    [/b] Jump to top / bottom
 
 [b]OPS log[/b]
   [b]enter    [/b] Open entry detail
   [b]esc / q  [/b] Close detail
+
+[b]CALENDAR[/b]
+  [b]m        [/b] Toggle metric (cost ↔ requests)
 
 [b]General[/b]
   [b]r        [/b] Pause / resume auto-refresh
