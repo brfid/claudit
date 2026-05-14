@@ -146,19 +146,61 @@ def subagent_cost_rollup(entries: List[Tuple]) -> Dict[str, float]:
 
 # ── Display-string helpers ────────────────────────────────────────────────
 
+# Context-window qualifiers we want to surface in display names.
+# Example: ``claude-opus-4-7:1m`` → ``opus-4.7-1M``. These tags can appear
+# after a ``-`` or ``:`` separator in the raw model ID and may be lower or
+# upper case; we always render them upper case.
+_CONTEXT_WINDOW_TAGS = ("1m", "200k", "100k", "32k", "16k", "8k")
+
+
 def _extract_version_suffix(tail: str) -> str:
     """Pick out leading ``.``-joined numbers in a model-ID tail.
 
     e.g. ``"4-5-20250929"`` → ``"4.5"`` (drops the date stamp).
+    Anything after a ``:`` (typically a context-window qualifier) is
+    truncated first so ``"4-7:1m"`` → ``"4.7"``.
     Returns ``""`` if no leading digit group is present.
     """
+    head = tail.split(":", 1)[0]
     nums: List[str] = []
-    for part in tail.split("-"):
+    for part in head.split("-"):
         if part.isdigit() and len(part) < 4:
             nums.append(part)
         else:
             break
     return ".".join(nums)
+
+
+def _extract_context_tag(model: str) -> str:
+    """Find a context-window qualifier in a raw model ID.
+
+    Looks for any of ``_CONTEXT_WINDOW_TAGS`` after a ``-`` or ``:``
+    boundary, case-insensitive. Returns the upper-case tag (e.g. ``"1M"``)
+    or ``""`` if none found. Multiple matches keep the first occurrence so
+    ``claude-opus-4-7:1m-v2`` still yields ``1M``.
+    """
+    if not model:
+        return ""
+    lowered = model.lower()
+    for tag in _CONTEXT_WINDOW_TAGS:
+        for sep in ("-", ":"):
+            needle = sep + tag
+            idx = lowered.find(needle)
+            if idx == -1:
+                continue
+            end = idx + len(needle)
+            # Tag must terminate at end-of-string or another boundary so
+            # ``-1m`` doesn't match the leading ``1m`` of ``-1m-instruct``
+            # while still allowing ``-1m`` at end-of-string. We accept any
+            # following separator.
+            if end == len(lowered) or lowered[end] in "-:_.":
+                return tag.upper()
+    return ""
+
+
+def _with_ctx(base: str, ctx_tag: str) -> str:
+    """Append a context-window qualifier to a short name when present."""
+    return f"{base}-{ctx_tag}" if ctx_tag else base
 
 
 def short_model(model: Optional[str]) -> str:
@@ -167,12 +209,17 @@ def short_model(model: Optional[str]) -> str:
     Anthropic:
       claude-opus-4-6            → opus-4.6
       claude-sonnet-4-5-20250929 → sonnet-4.5
+      claude-opus-4-7:1m         → opus-4.7-1M
 
     OpenAI / others:
       gpt-5-5                    → gpt-5.5
       gpt-5-nano                 → gpt-5-nano
       openai.gpt-5-mini          → gpt-5-mini (after normalization upstream)
       us.amazon.nova-pro-v1      → nova (family only; version parsing is best-effort)
+
+    Context-window qualifiers (``-1m``, ``:1m``, ``-200k``, …) are appended
+    in upper-case form so the long-context variants are visibly distinct
+    from their default-window siblings.
 
     Unrecognized IDs fall back to the first dash-segment.
     """
@@ -182,18 +229,21 @@ def short_model(model: Optional[str]) -> str:
     if fam is None:
         return model.split("-", 1)[0] if "-" in model else model
 
+    ctx = _extract_context_tag(model)
+
     # For the GPT-5 sub-families (nano/mini), the key already includes the
     # qualifier — don't strip it, just return as-is.
     if fam.key in ("gpt-5-nano", "gpt-5-mini"):
-        return fam.key
+        return _with_ctx(fam.key, ctx)
 
     # For claude-*, we prefer the dot-joined version suffix.
     if fam.key in ("opus", "sonnet", "haiku"):
         prefix = f"claude-{fam.key}-"
         if model.startswith(prefix):
             ver = _extract_version_suffix(model[len(prefix):])
-            return f"{fam.key}-{ver}" if ver else fam.key
-        return fam.key
+            base = f"{fam.key}-{ver}" if ver else fam.key
+            return _with_ctx(base, ctx)
+        return _with_ctx(fam.key, ctx)
 
     # For gpt-5/gpt-4/etc, try to extract a trailing version too.
     # e.g. "gpt-5-5" → "gpt-5.5"; "gpt-5" alone → "gpt-5".
@@ -202,8 +252,9 @@ def short_model(model: Optional[str]) -> str:
     if idx >= 0:
         tail = model[idx + len(token):].lstrip("-")
         ver = _extract_version_suffix(tail)
-        return f"{fam.key}.{ver}" if ver else fam.key
-    return fam.key
+        base = f"{fam.key}.{ver}" if ver else fam.key
+        return _with_ctx(base, ctx)
+    return _with_ctx(fam.key, ctx)
 
 
 def model_color(short: str) -> str:

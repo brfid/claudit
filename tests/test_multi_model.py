@@ -115,6 +115,31 @@ class TestShortModel:
     def test_none(self):
         assert short_model(None) in ("unknown", "?", "—", "")
 
+    # ── Context-window qualifiers ──
+    # Long-context variants must render distinctly so the OPS panel and
+    # call log don't conflate billing buckets that may differ in price.
+
+    def test_opus_1m_colon(self):
+        # Bedrock 1M-context Opus uses a ``:`` separator
+        assert short_model("claude-opus-4-7:1m") == "opus-4.7-1M"
+
+    def test_opus_1m_dash(self):
+        assert short_model("claude-opus-4-7-1m") == "opus-4.7-1M"
+
+    def test_opus_v_qualifier_no_context(self):
+        # ``-v1`` is a stable-release qualifier, not a context window
+        assert short_model("claude-opus-4-7-v1") == "opus-4.7"
+
+    def test_gpt5_200k(self):
+        assert short_model("gpt-5:200k") == "gpt-5-200K"
+
+    def test_gpt5_mini_200k(self):
+        assert short_model("gpt-5-mini:200k") == "gpt-5-mini-200K"
+
+    def test_sonnet_dated_no_context(self):
+        # Date stamp must not look like a context tag
+        assert short_model("claude-sonnet-4-5-20250929") == "sonnet-4.5"
+
 
 # ── model_color ───────────────────────────────────────────────────────────
 
