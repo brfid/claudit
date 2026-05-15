@@ -487,6 +487,33 @@ Sparkline > .sparkline--min-color {
     height: auto;
 }
 
+/* Fill remaining vertical space — used by CALLS bucket panel so it
+   grows with the terminal instead of collapsing to content height. */
+.ops-panel-fill {
+    height: 1fr;
+    min-height: 14;
+}
+
+/* CALLS tab: bucket histogram row.
+   Wider label cell than the standard ops ranked-panel row so the
+   bucket range, count, and share fit without crowding the bar. */
+.calls-bucket-row {
+    height: 1;
+    width: 100%;
+    margin-bottom: 0;
+}
+
+.calls-bucket-label {
+    width: 38;
+    height: 1;
+}
+
+.calls-bucket-suffix {
+    width: auto;
+    height: 1;
+    padding: 0 0 0 1;
+}
+
 .ops-project-row {
     height: 1;
     color: #FFCC99;

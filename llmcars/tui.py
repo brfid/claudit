@@ -860,12 +860,17 @@ class CostTrackerApp(App):
     # ── Session cost histogram ──
 
     def _build_cost_histogram(self) -> Widget:
-        """Log-spaced bucket histogram with horizontal bars + percentile flags.
+        """Per-call cost distribution.
 
-        Plotext's plt.hist with linear bins is dominated by the tiny-cost mass
-        and hides the interesting tail. We bucket costs into intuitive dollar
-        ranges (<$0.01, $0.01-$0.05, ..., >$5) and draw horizontal count bars
-        with percentile markers inline.
+        Layout matches the rest of the LCARS dashboard:
+          1. Header SESSION-STATS-style stat row (CALLS / TOTAL / MEDIAN /
+             MEAN / P95 / P99) in an ``ops-panel-session``.
+          2. Bucket panel with one ranked-panel-style row per log-spaced
+             bucket. Each row uses a ``FluidBar`` so the histogram
+             auto-sizes to terminal width.
+
+        Percentile flags live to the right of the bar (next to the LCARS
+        end cap), keeping the bar geometry clean.
         """
         costs = []
         for _dt, entry in _iter_individual_entries(self._ledger, self._source_filter):
@@ -881,6 +886,8 @@ class CostTrackerApp(App):
         p95 = costs[int(len(costs) * 0.95)]
         p99 = costs[int(len(costs) * 0.99)]
         mean = sum(costs) / len(costs)
+        total_calls = len(costs)
+        total_cost = sum(costs)
 
         # Log-spaced buckets covering typical API call cost range
         bucket_edges = [0, 0.001, 0.005, 0.01, 0.05, 0.10, 0.25, 0.50,
@@ -899,8 +906,6 @@ class CostTrackerApp(App):
                     bucket_totals[i] += c
                     break
 
-        total_calls = len(costs)
-        total_cost = sum(costs)
         max_count = max(bucket_counts) if bucket_counts else 1
 
         # Percentile positions mapped to bucket index
@@ -913,58 +918,114 @@ class CostTrackerApp(App):
         p95_b = bucket_of(p95)
         p99_b = bucket_of(p99)
 
-        bar_width = 40
-        rows: list[Widget] = [
-            Label(
-                f" [#9999CC]Calls[/] [#FF9900]{total_calls:,}[/]  "
-                f"[#9999CC]Total[/] [#FF9900]{format_cost(total_cost)}[/]  "
-                f"[#9999CC]Median[/] [#FFCC99]{format_cost(median)}[/]  "
-                f"[#9999CC]Mean[/] [#FFCC99]{format_cost(mean)}[/]  "
-                f"[#9999CC]P95[/] [#FFCC99]{format_cost(p95)}[/]  "
-                f"[#9999CC]P99[/] [#FFCC99]{format_cost(p99)}[/]",
-                classes="ops-kv-line", markup=True,
+        # Header: stat-band row (matches OPS SESSION STATS look).
+        header_row = Horizontal(
+            self._build_recent_stat(
+                "CALLS", "",
+                value=f"{total_calls:,}",
+                detail="non-zero cost",
             ),
-            Label(" ", classes="ops-kv-line"),
-            Label(
-                f" [b]{'BUCKET':<16}[/b] {'COUNT':>7} {'SHARE':>6}  "
-                f"{'DISTRIBUTION':<{bar_width}}  {'COST SUM':>8}",
-                classes="ops-log-header", markup=True,
+            self._build_recent_stat(
+                "TOTAL", "alt",
+                value=format_cost(total_cost),
+                detail=f"avg {format_cost(mean)}",
             ),
-        ]
+            self._build_recent_stat(
+                "MEDIAN", "accent",
+                value=format_cost(median),
+                detail="50th pct",
+            ),
+            self._build_recent_stat(
+                "P95", "",
+                value=format_cost(p95),
+                detail="95th pct",
+            ),
+            self._build_recent_stat(
+                "P99", "alt",
+                value=format_cost(p99),
+                detail="99th pct",
+            ),
+            self._build_recent_stat(
+                "MAX", "accent",
+                value=format_cost(costs[-1]),
+                detail=f"min {format_cost(costs[0])}",
+            ),
+            classes="ops-stat-row",
+        )
+        header_panel = Vertical(
+            header_row, classes="ops-panel ops-panel-session",
+        )
+        header_panel.border_title = "◖ COST DISTRIBUTION ◗"
+        header_panel.border_subtitle = (
+            f"per API call · {total_calls:,} calls · {format_cost(total_cost)} total"
+        )
 
+        # Bucket rows — one FluidBar each, with percentile flag suffixes.
+        bucket_children: list[Widget] = [Label(
+            f"  [b]{'BUCKET':<16}{'COUNT':>8}{'SHARE':>8}[/b]   "
+            f"DISTRIBUTION                              "
+            f"[b]{'COST SUM':>10}[/b]",
+            classes="ops-log-header", markup=True,
+        )]
         for i, (lbl, count, tot) in enumerate(
             zip(bucket_labels, bucket_counts, bucket_totals)
         ):
             share = count / total_calls * 100 if total_calls else 0
-            bar_len = int(count / max_count * bar_width) if max_count else 0
-            bar = "█" * bar_len + "░" * (bar_width - bar_len)
-            # Inline percentile flags at their bucket
-            flags = ""
-            if i == median_b:
-                flags += "[#9999CC] ◀ med[/]"
-            if i == p95_b:
-                flags += "[#CC6699] ◀ p95[/]"
-            if i == p99_b:
-                flags += "[#FF9900] ◀ p99[/]"
+            fraction = (count / max_count) if max_count else 0
             cost_str = format_cost(tot) if tot > 0 else "—"
-            rows.append(Label(
-                f" [#FFCC99]{lbl:<16}[/] [#FF9900]{count:>7,}[/] "
-                f"[dim]{share:>5.1f}%[/]  "
-                f"[#FF9900]{bar}[/]{flags}  [#CC9966]{cost_str:>8}[/]",
-                classes="ops-kv-line", markup=True,
+
+            # Bar fill color escalates with bucket cost — periwinkle for
+            # cheap buckets, mauve mid-range, amber for the tail. Matches
+            # the cost-warmth gradient used by the SPEND HEATMAP.
+            if i <= 2:
+                fill = "#9999CC"
+            elif i <= 6:
+                fill = "#CC6699"
+            else:
+                fill = "#FF9900"
+
+            flag = ""
+            if i == median_b:
+                flag = " [#9999CC]◀ med[/]"
+            if i == p95_b:
+                flag = (flag + " [#CC6699]◀ p95[/]") if flag else " [#CC6699]◀ p95[/]"
+            if i == p99_b:
+                flag = (flag + " [#FF9900]◀ p99[/]") if flag else " [#FF9900]◀ p99[/]"
+
+            bucket_children.append(Horizontal(
+                Label(
+                    f" [#FFCC99]{lbl:<16}[/] [#FF9900]{count:>7,}[/] "
+                    f"[dim]{share:>6.1f}%[/] ",
+                    classes="calls-bucket-label", markup=True,
+                ),
+                Static("[#CC6699]◖[/]", classes="bar-cap", markup=True),
+                FluidBar(fraction, fill_color=fill, classes="fluid-bar"),
+                Static("[#CC6699]◗[/]", classes="bar-cap", markup=True),
+                Label(
+                    f"{flag} [#CC9966]{cost_str:>10}[/]",
+                    classes="calls-bucket-suffix", markup=True,
+                ),
+                classes="calls-bucket-row",
             ))
 
-        rows.append(Label(" ", classes="ops-kv-line"))
-        rows.append(Label(
+        bucket_children.append(Label(
             " [dim]Buckets are log-spaced; most calls cluster at the low end. "
             "Percentile markers (◀) flag where the median, P95, and P99 fall.[/]",
             classes="ops-kv-line", markup=True,
         ))
 
-        panel = Vertical(*rows, classes="ops-panel")
-        panel.border_title = "◖ COST DISTRIBUTION ◗"
-        panel.border_subtitle = "per API call"
-        return Vertical(panel, classes="chart-panel")
+        bucket_panel = Vertical(
+            *bucket_children, classes="ops-panel ops-panel-fill",
+        )
+        bucket_panel.border_title = "◖ BUCKETS ◗"
+        bucket_panel.border_subtitle = (
+            f"log-spaced · {len(bucket_labels)} ranges"
+        )
+
+        return Vertical(
+            header_panel, bucket_panel,
+            classes="chart-panel chart-stack",
+        )
 
     # ── RECENT tab ──────────────────────────────────────────────────────
     #
