@@ -1,8 +1,8 @@
 # llmcars stability contract
 
-External tools (notably `techdocs-hub/llm-lab/footer/cc-footer.cjs`) **vendor** small pieces of llmcars rather than import it. This file documents the API shapes those embedders rely on so we don't break them silently when refactoring internals.
+llmcars has no external embedders today. This file is forward-looking: if a future tool wants to **vendor** small pieces of llmcars rather than import it (the supported pattern — `import llmcars` is not), this file pins the API shapes that vendor would copy, so internal refactors don't break it silently.
 
-If you change anything listed here, bump the **STABLE_VERSION** below and update the pinned commit hash in every embedder's header.
+If you change anything listed here, bump the **STABLE_VERSION** below. Future embedders pin to a commit hash and the version number, and re-pin on drift.
 
 ```text
 STABLE_VERSION = 1
@@ -112,16 +112,14 @@ A vendoring embedder must:
 3. Reference STABLE_VERSION in that comment.
 4. On any drift between vendored copy and current llmcars, update the copy and bump the pin in the same commit.
 
-Example (from `cc-footer.cjs`):
+Example header for a vendored copy:
 
 ```text
-// Cost math + provider-prefix stripping vendored from llmcars.
-// Source of truth: ~/src/llmcars (commit <full sha>)
-// Stability: llmcars/STABILITY.md, STABLE_VERSION = 1.
+# Vendored from llmcars/llmcars/pricing.py — DO NOT IMPORT llmcars DIRECTLY.
+# Source of truth: ~/src/llmcars (commit <full sha>)
+# Stability contract: ~/src/llmcars/STABILITY.md, STABLE_VERSION = 1.
 ```
 
 ## Known embedders
 
-- `techdocs-hub/llm-lab/footer/cc-footer.cjs` — Claude Code statusLine renderer for the workshop `claude` container.
-
-When you add another, append it here.
+None today. When one lands, append it here with the path and the pieces it vendors.
